@@ -15,4 +15,6 @@ RUN dnf install -y epel-release && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
-CMD ["/bin/bash"]
+# Keep the container running indefinitely so it can be exec'd into, e.g.:
+#   podman exec -it <container> bash
+CMD ["sleep", "infinity"]
