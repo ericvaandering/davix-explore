@@ -11,7 +11,7 @@ LABEL org.opencontainers.image.title="davix" \
 
 # Install EPEL (Extra Packages for Enterprise Linux) and then davix
 RUN dnf install -y epel-release && \
-    dnf install -y davix && \
+    dnf install -y davix voms-clients-cpp && \
     dnf clean all && \
     rm -rf /var/cache/dnf
 
