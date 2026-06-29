@@ -215,15 +215,9 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     # Use davix-ls in recursive parallel mode
     command = ['davix-ls', f'-r{max_scanners}', f'davs://{server_root}/{root}']
 
-    # Open the process with line buffering enabled
-    with subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            text=True,  # Return strings instead of bytes
-            bufsize=1  # Line-buffered output
-    ) as process:
-        # Stream the output line-by-line as it arrives
-        for line in process.stdout:
+    # Open the process with line buffering enabled and return strings instead of bytes
+    with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+        for line in process.stdout:  # Stream the output line-by-line as it arrives
             path = line.strip()
             logpath = path_converter.path_to_logpath(path)
             n_files += 1
