@@ -569,11 +569,11 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 
     remove_prefix = config.RemovePrefix
     add_prefix = config.AddPrefix
-    server_root = config.Server
+    server_root = config.DavsServer
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
     # Use davix-ls in recursive parallel mode
-    command = ['davix-ls', f'-r{max_scanners}', f'davs://{config.Server}/{root}']
+    command = ['davix-ls', f'-r{max_scanners}', f'davs://{server_root}/{root}']
 
     # Open the process with line buffering enabled
     with subprocess.Popen(
@@ -602,122 +602,119 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     # pdb.set_trace()
 
 
-def scan_root(rse, config, client, root, root_expected, my_stats, stats, stats_key,
-              quiet, display_progress, max_files,
-              recursive_threshold, max_scanners, timeout,
-              files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
-              ignore_failed_directories, include_sizes,
-              do_trace):
-    failed = root_failed = False
-
-    server = config.Server
-    server_root = config.ServerRoot
-    is_redirector = config.ServerIsRedirector
-    ignore_list = config.IgnoreList
-
-    t0 = time.time()
-    root_stats = {
-        "root": root,
-        "expected": root_expected,
-        "start_time": t0,
-        "timeout": timeout,
-        "recursive_threshold": recursive_threshold,
-        "max_scanners": max_scanners,
-        "servers": client.Servers
-    }
-
-    my_stats["scanning"] = root_stats
-    if stats is not None:
-        stats.update_section(stats_key, my_stats)
-    next_stats_update = time.time() + 60
-
-    remove_prefix = config.RemovePrefix
-    add_prefix = config.AddPrefix
-    path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
-
-    master = ScannerMaster(client, path_converter, root, root_expected, recursive_threshold, max_scanners, timeout,
-                           quiet, display_progress,
-                           stats=stats, my_stats=my_stats,
-                           max_files=max_files, include_sizes=include_sizes,
-                           files_out=files_list,
-                           empty_dirs_out=empty_dirs_list, compute_empty_dirs=compute_empty_dirs,
-                           ignore_list=ignore_list, do_trace=do_trace)
-
-    path_filter = None  # -- obsolete -- config.scanner_filter(rse)
-    # if path_filter is not None:
-    #    path_filter = re.compile(path_filter)
-    rewrite_path, rewrite_out = None, None  # -- obsolete -- config.scanner_rewrite(rse)
-    if rewrite_path is not None:
-        assert rewrite_out is not None
-        rewrite_path = re.compile(rewrite_path)
-
-    print("Starting scan of %s:%s with:" % (server, root))
-    print("  Include sizes       = %s" % include_sizes)
-    print("  Recursive threshold = %d" % (recursive_threshold,))
-    print("  Max scanner threads = %d" % max_scanners)
-    print("  Timeout             = %s" % timeout)
-    if ignore_list:
-        print("  Ignore list:")
-        for p in ignore_list:
-            print("    ", p)
-
-    master.start()
-    master.join()
-
-    if display_progress:
-        master.close_progress()
-
-    if master.Failed:
-        sys.stderr.write("Scanner failed to scan %s: %s\n" % (root, master.Error))
-
-    if master.GaveUp:
-        sys.stderr.write("Scanner failed to scan the following %d locations:\n" % (len(master.GaveUp),))
-        for path, error in sorted(list(master.GaveUp.items())):
-            sys.stderr.write(f"{path}: {error}\n")
-
-    print("Files:                %d" % (master.NFiles,))
-    print("Files ignored:        %d" % (master.IgnoredFiles,))
-    print("Directories found:    %d" % (master.NToScan,))
-    print("Directories ignored:  %d" % (master.IgnoredDirs,))
-    print("Directories scanned:  %d" % (master.NScanned,))
-    print("Directories:          %d" % (master.NDirectories,))
-    print("  empty directories:  %d" % (master.NEmptyDirs,))
-    print("Failed directories:   %d" % (len(master.GaveUp),))
-    if include_sizes:
-        print("Total size:           %.3f GB" % (master.TotalSize / GB))
-    t1 = time.time()
-    elapsed = int(t1 - t0)
-    s = elapsed % 60
-    m = elapsed // 60
-    print("Elapsed time:         %dm %02ds\n" % (m, s))
-
-    if (not ignore_failed_directories) and master.GaveUp:
-        failed = True
-
-    total_size = None if failed or master.TotalSize is None else master.TotalSize / GB
-
-    root_stats.update({
-        "root_failed": False,
-        "error": master.Error,
-        "failed_subdirectories": master.GaveUp,
-        "files": master.NFiles,
-        "directories": master.NDirectories,
-        "empty_directories": master.NEmptyDirs,
-        "directories_ignored": master.IgnoredDirs,
-        "files_ignored": master.IgnoredFiles,
-        "end_time": t1,
-        "elapsed_time": t1 - t0,
-        "total_size_gb": total_size,
-        "servers": client.Servers
-    })
-
-    del my_stats["scanning"]
-    my_stats["roots"].append(root_stats)
-    if stats is not None:
-        stats[stats_key] = my_stats
-        if failed:
-            stats["error"] = root_stats.get("error")
-    return failed
+# def scan_root(rse, config, client, root, root_expected, my_stats, stats, stats_key,
+#               quiet, display_progress, max_files,
+#               recursive_threshold, max_scanners, timeout,
+#               files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
+#               ignore_failed_directories, include_sizes,
+#               do_trace):
+#     failed = root_failed = False
+#
+#     server = config.DavsServer
+#     server_root = config.DavsRoot
+#     # is_redirector = config.ServerIsRedirector
+#     ignore_list = config.IgnoreList
+#
+#     t0 = time.time()
+#     root_stats = {
+#         "root": root,
+#         "expected": root_expected,
+#         "start_time": t0,
+#         "timeout": timeout,
+#         "recursive_threshold": recursive_threshold,
+#         "max_scanners": max_scanners,
+#         "servers": client.Servers
+#     }
+#
+#     my_stats["scanning"] = root_stats
+#     if stats is not None:
+#         stats.update_section(stats_key, my_stats)
+#     next_stats_update = time.time() + 60
+#
+#     remove_prefix = config.RemovePrefix
+#     add_prefix = config.AddPrefix
+#     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
+#
+#     master = ScannerMaster(client, path_converter, root, root_expected, recursive_threshold, max_scanners, timeout,
+#                            quiet, display_progress,
+#                            stats=stats, my_stats=my_stats,
+#                            max_files=max_files, include_sizes=include_sizes,
+#                            files_out=files_list,
+#                            empty_dirs_out=empty_dirs_list, compute_empty_dirs=compute_empty_dirs,
+#                            ignore_list=ignore_list, do_trace=do_trace)
+#
+#     rewrite_path, rewrite_out = None, None
+#     if rewrite_path is not None:
+#         assert rewrite_out is not None
+#         rewrite_path = re.compile(rewrite_path)
+#
+#     print("Starting scan of %s:%s with:" % (server, root))
+#     print("  Include sizes       = %s" % include_sizes)
+#     print("  Recursive threshold = %d" % (recursive_threshold,))
+#     print("  Max scanner threads = %d" % max_scanners)
+#     print("  Timeout             = %s" % timeout)
+#     if ignore_list:
+#         print("  Ignore list:")
+#         for p in ignore_list:
+#             print("    ", p)
+#
+#     master.start()
+#     master.join()
+#
+#     if display_progress:
+#         master.close_progress()
+#
+#     if master.Failed:
+#         sys.stderr.write("Scanner failed to scan %s: %s\n" % (root, master.Error))
+#
+#     if master.GaveUp:
+#         sys.stderr.write("Scanner failed to scan the following %d locations:\n" % (len(master.GaveUp),))
+#         for path, error in sorted(list(master.GaveUp.items())):
+#             sys.stderr.write(f"{path}: {error}\n")
+#
+#     print("Files:                %d" % (master.NFiles,))
+#     print("Files ignored:        %d" % (master.IgnoredFiles,))
+#     print("Directories found:    %d" % (master.NToScan,))
+#     print("Directories ignored:  %d" % (master.IgnoredDirs,))
+#     print("Directories scanned:  %d" % (master.NScanned,))
+#     print("Directories:          %d" % (master.NDirectories,))
+#     print("  empty directories:  %d" % (master.NEmptyDirs,))
+#     print("Failed directories:   %d" % (len(master.GaveUp),))
+#     if include_sizes:
+#         print("Total size:           %.3f GB" % (master.TotalSize / GB))
+#     t1 = time.time()
+#     elapsed = int(t1 - t0)
+#     s = elapsed % 60
+#     m = elapsed // 60
+#     print("Elapsed time:         %dm %02ds\n" % (m, s))
+#
+#     if (not ignore_failed_directories) and master.GaveUp:
+#         failed = True
+#
+#     total_size = None if failed or master.TotalSize is None else master.TotalSize / GB
+#
+#     root_stats.update({
+#         "root_failed": False,
+#         "error": master.Error,
+#         "failed_subdirectories": master.GaveUp,
+#         "files": master.NFiles,
+#         "directories": master.NDirectories,
+#         "empty_directories": master.NEmptyDirs,
+#         "directories_ignored": master.IgnoredDirs,
+#         "files_ignored": master.IgnoredFiles,
+#         "end_time": t1,
+#         "elapsed_time": t1 - t0,
+#         "total_size_gb": total_size,
+#         "servers": client.Servers
+#     })
+#
+#     del my_stats["scanning"]
+#     my_stats["roots"].append(root_stats)
+#     if stats is not None:
+#         stats[stats_key] = my_stats
+#         if failed:
+#             stats["error"] = root_stats.get("error")
+#     return failed
 
 
 def main():
@@ -737,9 +734,9 @@ def main():
     display_progress = not quiet and "-v" in opts
     max_files = int(opts.get("-M", 0)) or None
 
-    recursive_threshold = int(opts.get("-R", config.RecursionThreshold))
-    max_scanners = int(opts.get("-m", config.NWorkers))
-    timeout = int(opts.get("-t", config.ScannerTimeout))
+    # recursive_threshold = int(opts.get("-R", config.RecursionThreshold))
+    max_scanners = int(opts.get("-m", config.DavsNWorkers))
+    timeout = int(opts.get("-t", config.DavsTimeout))
 
     stats_file = opts.get("-s")
     stats_key = opts.get("-S", "scanner")
@@ -797,11 +794,11 @@ def main():
         else:
             empty_dirs_out = open(empty_dirs_file, "w")
 
-    server = config.Server
-    server_root = config.ServerRoot
+    server = config.DavsServer
+    server_root = config.DavsRoot
     include_sizes = config.IncludeSizes and not "-x" in opts
-    if not server_root:
-        print(f"Server root is not defined for {rse}. Should be defined as 'server_root'")
+    if not server_root or not server:
+        print(f"Server or server root is not defined for {rse} using DAVS. Should be defined as 'server_root'")
         sys.exit(2)
 
     t = time.time()
@@ -835,7 +832,7 @@ def main():
 
     t0 = time.time()
     # This is where the meat starts
-    good_roots, failed_roots = validate_roots(server, server_root, config.RootList, config.ScannerTimeout)
+    good_roots, failed_roots = validate_roots(server, server_root, config.RootList, timeout)
     t1 = time.time()
 
     failed = False
