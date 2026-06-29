@@ -544,7 +544,7 @@ def path_to_lfn(path, path_prefix, remove_prefix, add_prefix, path_filter, rewri
 
 def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                   quiet, display_progress, max_files,
-                  recursive_threshold, max_scanners, timeout,
+                  max_scanners, timeout,
                   files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
                   ignore_failed_directories, include_sizes,
                   do_trace):
@@ -558,7 +558,6 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         "expected": root_expected,
         "start_time": t0,
         "timeout": timeout,
-        "recursive_threshold": recursive_threshold,
         "max_scanners": max_scanners,
         # "servers": client.Servers
     }
@@ -861,7 +860,7 @@ def main():
                 expected = root_file_counts.get(root, 0) > 0
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_files,
-                                       recursive_threshold, max_scanners, timeout,
+                                       max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
 
