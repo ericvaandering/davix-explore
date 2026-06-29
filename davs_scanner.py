@@ -31,23 +31,23 @@ except:
 
 
 # FIXME: Do I need this
-def truncated_path(root, path):
-    if path == root:
-        return "/"
-    relpath = path
-    if path.startswith(root + "/"):
-        relpath = path[len(root) + 1:]
-    N = 5
-    parts = relpath.split("/")
-    while parts and not parts[0]:
-        parts = parts[1:]
-    if len(parts) <= N:
-        # return "%s -> %s" % (path, relpath)
-        return relpath
-    else:
-        n = len(parts)
-        # return ("%s -> ..(%d)../" % (path, n-N))+"/".join(parts[-N:])
-        return ("..(%d)../" % (n - N)) + "/".join(parts[-N:])
+# def truncated_path(root, path):
+#     if path == root:
+#         return "/"
+#     relpath = path
+#     if path.startswith(root + "/"):
+#         relpath = path[len(root) + 1:]
+#     N = 5
+#     parts = relpath.split("/")
+#     while parts and not parts[0]:
+#         parts = parts[1:]
+#     if len(parts) <= N:
+#         # return "%s -> %s" % (path, relpath)
+#         return relpath
+#     else:
+#         n = len(parts)
+#         # return ("%s -> ..(%d)../" % (path, n-N))+"/".join(parts[-N:])
+#         return ("..(%d)../" % (n - N)) + "/".join(parts[-N:])
 
 
 # FIXME: Do I need this
@@ -60,13 +60,13 @@ def canonic_path(path):
 
 
 # FIXME: Do I need this
-def relative_path(root, path):
-    # returns part relative to the root. Returned relative path does NOT have leading slash
-    # if the argument path does not start with root, returns the path unchanged
-    path = canonic_path(path)
-    if path.startswith(root + "/"):
-        path = path[len(root) + 1:]
-    return path
+# def relative_path(root, path):
+#     # returns part relative to the root. Returned relative path does NOT have leading slash
+#     # if the argument path does not start with root, returns the path unchanged
+#     path = canonic_path(path)
+#     if path.startswith(root + "/"):
+#         path = path[len(root) + 1:]
+#     return path
 
 
 # FIXME: Do I need this
@@ -91,11 +91,6 @@ class PathConverter(object):
             path = self.AddPrefix + path
 
         return canonic_path(path)
-
-
-# FIXME: Do I need this
-
-# Signature:    good_roots, failed_roots = Prescanner(server, server_root, config.ServerIsRedirector, config.RootList, config.ScannerTimeout, max_scanners).run()
 
 
 def validate_roots(server, server_root, root_list, timeout):
