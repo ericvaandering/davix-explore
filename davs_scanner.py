@@ -221,6 +221,9 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     # Use davix-ls in recursive parallel mode
     command = ['davix-ls', '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
 
+    # FIXME: This does not worry about the list of all directories since we discard that from the very beginning
+    # FIXME: It could be added.
+
     # Open the process with line buffering enabled and return strings instead of bytes
     with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
         for line in process.stdout:  # Stream the output line-by-line as it arrives
@@ -229,13 +232,10 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
             logpath = path_converter.path_to_logpath(path)
 
             # The entry is a directory
-            if compute_empty_dirs and drwx.startswith('d'):
-                if dirs_list is not None:
-                    dirs_list.append(logpath)
-                if not int(size):
-                    n_empty_dirs += 1
-                    if empty_dirs_list is not None:
-                        empty_dirs_list.append(logpath)
+            if compute_empty_dirs and drwx.startswith('d') and not int(size):
+                n_empty_dirs += 1
+                if empty_dirs_list is not None:
+                    empty_dirs_list.write(logpath + "\n")
 
             # The entry is a file
             if drwx.startswith('-'):
@@ -253,7 +253,6 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         # return "failed", None, None, None, process.stderr
     pdb.set_trace()
     return False
-
 
     # return "done", dirs, files, empty_dirs_list, None
 
@@ -313,18 +312,10 @@ def main():
     #
     empty_dirs_out = None
     empty_dirs_file = opts.get("-e")
-    empty_dirs_count_only = empty_dirs_file == "count-only"
+    empty_dirs_count_only = (empty_dirs_file == "count-only")
     if empty_dirs_count_only:
         empty_dirs_file = None
     compute_empty_dirs = bool(empty_dirs_count_only or empty_dirs_file)
-    if compute_empty_dirs and "-E" in opts:
-        modulo = int(opts["-E"])
-        assert modulo != 0
-        rse_hash = int.from_bytes(md5(rse.encode("utf-8")).digest(), byteorder='big')
-        day_number = int(time.time() / (24 * 3600))
-        compute_empty_dirs = (day_number % modulo) == (rse_hash % modulo)
-        if not compute_empty_dirs:
-            print("Empty directories list will not be computed because the day does not match the -E option value")
 
     print("Compute empty dirs:", compute_empty_dirs)
     print("Empty dirs outut:", "count only" if empty_dirs_count_only else empty_dirs_file)
@@ -395,8 +386,6 @@ def main():
         })
         failed = failed or expected
 
-    pdb.set_trace()
-
     if not failed:
         all_roots_failed = not good_roots
         print(good_roots)
@@ -409,7 +398,7 @@ def main():
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_files,
                                        max_scanners, timeout,
-                                       out_list, compute_empty_dirs, empty_dirs_list, None,
+                                       out_list, compute_empty_dirs, empty_dirs_out, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
 
             except:
