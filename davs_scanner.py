@@ -220,11 +220,12 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 
     # Use davix-ls in recursive parallel mode
     command = ['davix-ls', '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
-
+    pdb.set_trace()
     # Open the process with line buffering enabled and return strings instead of bytes
     with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
         for line in process.stdout:  # Stream the output line-by-line as it arrives
             drwx, zero, size, cdate, ctime, path = line.strip().split()
+            pdb.set_trace()
             logpath = path_converter.path_to_logpath(path)
 
             # The entry is a directory
