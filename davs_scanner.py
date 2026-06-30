@@ -225,7 +225,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
         for line in process.stdout:  # Stream the output line-by-line as it arrives
             drwx, zero, size, cdate, ctime, path = line.strip().split()
-            pdb.set_trace()
+
             logpath = path_converter.path_to_logpath(path)
 
             # The entry is a directory
@@ -240,6 +240,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
             # The entry is a file
             if drwx.startswith('-'):
                 n_files += 1
+                pdb.set_trace()
                 if not file_ignored(logpath, ignore_list):
                     if files_list is not None:
                         files_list.add(logpath)
