@@ -3,14 +3,12 @@
 import getopt
 import gzip
 import json
-import pdb
-import re
+import subprocess
 import sys
 import time
 import traceback
 from datetime import datetime
-from hashlib import md5
-import subprocess
+
 import gfal2
 
 # from pythreader import TaskQueue, Task, DEQueue, PyThread, synchronized, ShellCommand, Primitive
@@ -104,13 +102,11 @@ def validate_roots(server, server_root, root_list, timeout):
     :return:
     """
 
-    # pdb.set_trace()
     good_roots = []
     failed_roots = {}
 
     ctx = gfal2.creat_context()
 
-    # 2. Target URL (e.g., a WebDAV or S3 endpoint)
     for root in root_list:
         url = f"davs://{server}{server_root}{root}"
 
@@ -123,8 +119,8 @@ def validate_roots(server, server_root, root_list, timeout):
             good_roots.append(root)
         except Exception as e:
             print(f" Missing: {root}")
-            failed_roots.update({root: f"Error accessing file: {e}"})
-    print(good_roots, failed_roots)
+            failed_roots.update({root: f"Error accessing directory: {e}"})
+
     return good_roots, failed_roots
 
 
@@ -140,7 +136,6 @@ python xrootd_scanner.py [options] <rse>
     -k                          - do not treat individual directories scan errors as overall scan failure
     -q                          - quiet - only print summary
     -x                          - do not use metadata (ls -l), do not include file sizes
-    -M <max_files>              - stop scanning the root after so many files were found
     -s <stats_file>             - write final statistics to JSON file
     -r <root count file>        - JSON file with file counds by root
     -E <n>                      - compile empty directories only event n-th day. n > 0
@@ -183,8 +178,7 @@ def file_ignored(logpath, ignore_list):
 
 
 def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
-                  quiet, display_progress, max_files,
-                  max_scanners, timeout,
+                  quiet, display_progress, max_scanners, timeout,
                   files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
                   ignore_failed_directories, include_sizes,
                   do_trace):
@@ -194,10 +188,6 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     n_empty_dirs = 0
 
     ignore_list = config.IgnoreList
-
-    files = None
-    dirs = []
-    # empty_dirs = []
 
     t0 = time.time()
     root_stats = {
@@ -250,11 +240,8 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     if process.returncode != 0:
         print(f"\nCommand failed with exit code {process.returncode}")
         return True
-        # return "failed", None, None, None, process.stderr
-    pdb.set_trace()
-    return False
 
-    # return "done", dirs, files, empty_dirs_list, None
+    return False
 
 
 def main():
@@ -272,7 +259,6 @@ def main():
 
     quiet = "-q" in opts
     display_progress = not quiet and "-v" in opts
-    max_files = int(opts.get("-M", 0)) or None
 
     # recursive_threshold = int(opts.get("-R", config.RecursionThreshold))
     max_scanners = int(opts.get("-m", config.DavsNWorkers))
@@ -361,8 +347,6 @@ def main():
 
     root_paths = [canonic_path(root if root.startswith("/") else server_root + "/" + root) for root in config.RootList]
 
-    # import pdb; pdb.set_trace()
-
     t0 = time.time()
     # This is where the meat starts
     good_roots, failed_roots = validate_roots(server, server_root, config.RootList, timeout)
@@ -396,7 +380,7 @@ def main():
                 expected = root_file_counts.get(root, 0) > 0
                 # FIXME: We need to write out the empty directories
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
-                                       quiet, display_progress, max_files,
+                                       quiet, display_progress,
                                        max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
