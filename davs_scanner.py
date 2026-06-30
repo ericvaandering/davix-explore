@@ -323,8 +323,9 @@ def main():
 
     print("Compute empty dirs:", compute_empty_dirs)
     print("Empty dirs outut:", "count only" if empty_dirs_count_only else empty_dirs_file)
-
+    empty_dirs_list = None
     if empty_dirs_file and compute_empty_dirs:
+        empty_dirs_list = []
         if empty_dirs_file.endswith(".gz"):
             empty_dirs_out = gzip.open(empty_dirs_file, "wt")
         else:
@@ -397,10 +398,11 @@ def main():
             try:
                 print(f"Scanning root {root} ...", file=sys.stderr)
                 expected = root_file_counts.get(root, 0) > 0
+                # FIXME: We need to write out the empty directories
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_files,
                                        max_scanners, timeout,
-                                       out_list, compute_empty_dirs, empty_dirs_out, None,
+                                       out_list, compute_empty_dirs, empty_dirs_list, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
 
             except:
@@ -415,6 +417,7 @@ def main():
             if failed:
                 break
 
+        # FIXME: Use a context manager here
         out_list.close()
         if empty_dirs_out is not None:
             empty_dirs_out.close()
