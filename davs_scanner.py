@@ -195,9 +195,9 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 
     ignore_list = config.IgnoreList
 
-    files = []
+    files = None
     dirs = []
-    empty_dirs = []
+    # empty_dirs = []
 
     t0 = time.time()
     root_stats = {
@@ -229,7 +229,8 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 
             # The entry is a directory
             if compute_empty_dirs and drwx.startswith('d'):
-                dirs_list.append(logpath)
+                if dirs_list is not None:
+                    dirs_list.append(logpath)
                 if not int(size):
                     n_empty_dirs += 1
                     if empty_dirs_list is not None:
@@ -249,7 +250,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         print(f"\nCommand failed with exit code {process.returncode}")
         return "failed", None, None, None, process.stderr
 
-    return "done", dirs, files, empty_dirs, None
+    return "done", dirs, files, empty_dirs_list, None
 
 
 def main():
