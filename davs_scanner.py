@@ -193,7 +193,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     n_ignored_files = 0
     n_empty_dirs = 0
 
-    ignore_list = config.DavsIgnoreList
+    ignore_list = config.IgnoreList
 
     files = []
     dirs = []
