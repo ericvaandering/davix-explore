@@ -172,10 +172,14 @@ def path_to_lfn(path, path_prefix, remove_prefix, add_prefix, path_filter, rewri
 
     if rewrite_path is not None:
         if not rewrite_path.search(lfn):
-            sys.stderr.write(f"Path rewrite pattern for root {root} did not find a match in path {lfn}\n")
+            sys.stderr.write(f"Path rewrite pattern for root {path_prefix} did not find a match in path {lfn}\n")
             sys.exit(1)
         lfn = rewrite_path.sub(rewrite_out, lfn)
     return lfn
+
+
+def file_ignored(logpath, ignore_list):
+    return any(logpath.startswith(subdir) for subdir in ignore_list) or logpath in ignore_list
 
 
 def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
@@ -187,6 +191,13 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     max_scanners = 32
     n_files = 0
     n_ignored_files = 0
+    n_empty_dirs = 0
+
+    ignore_list = config.DavsIgnoreList
+
+    files = []
+    dirs = []
+    empty_dirs = []
 
     t0 = time.time()
     root_stats = {
@@ -208,27 +219,37 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
     # Use davix-ls in recursive parallel mode
-    command = ['davix-ls', f'-r{max_scanners}', f'davs://{server_root}/{root}']
+    command = ['davix-ls', '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
 
     # Open the process with line buffering enabled and return strings instead of bytes
     with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
         for line in process.stdout:  # Stream the output line-by-line as it arrives
-            path = line.strip()
+            drwx, zero, size, cdate, ctime, path = line.strip().split()
             logpath = path_converter.path_to_logpath(path)
-            n_files += 1
-            if files_list is not None:  # and not self.file_ignored(logpath):
-                files_list.add(logpath)
-                # self.TotalSize += size
-            else:
-                n_ignored_files += 1
 
-            # print(line, end="")  # end="" prevents double newlines
+            # The entry is a directory
+            if compute_empty_dirs and drwx.startswith('d'):
+                dirs_list.append(logpath)
+                if not int(size):
+                    n_empty_dirs += 1
+                    if empty_dirs_list is not None:
+                        empty_dirs_list.append(logpath)
+
+            # The entry is a file
+            if drwx.startswith('-'):
+                n_files += 1
+                if not file_ignored(logpath, ignore_list):
+                    if files_list is not None:
+                        files_list.add(logpath)
+                else:
+                    n_ignored_files += 1
 
     # Check if the command executed successfully
     if process.returncode != 0:
         print(f"\nCommand failed with exit code {process.returncode}")
+        return "failed", None, None, None, process.stderr
 
-    # pdb.set_trace()
+    return "done", dirs, files, empty_dirs, None
 
 
 def main():
