@@ -250,9 +250,10 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     # Check if the command executed successfully
     if process.returncode != 0:
         print(f"\nCommand failed with exit code {process.returncode}")
-        return "failed", None, None, None, process.stderr
-
-    return "done", dirs, files, empty_dirs_list, None
+        return True
+        # return "failed", None, None, None, process.stderr
+    return False
+    # return "done", dirs, files, empty_dirs_list, None
 
 
 def main():
