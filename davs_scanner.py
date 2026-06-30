@@ -252,7 +252,10 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         print(f"\nCommand failed with exit code {process.returncode}")
         return True
         # return "failed", None, None, None, process.stderr
+    pdb.set_trace()
     return False
+
+
     # return "done", dirs, files, empty_dirs_list, None
 
 
