@@ -396,8 +396,10 @@ def main():
 
     if not failed:
         all_roots_failed = not good_roots
+        print(good_roots)
         for root in good_roots:
             try:
+                print(f"Scanning root {root} ...")
                 print(f"Scanning root {root} ...", file=sys.stderr)
                 expected = root_file_counts.get(root, 0) > 0
                 # FIXME: We need to write out the empty directories
