@@ -389,6 +389,8 @@ def main():
         })
         failed = failed or expected
 
+    pdb.set_trace()
+
     if not failed:
         all_roots_failed = not good_roots
         for root in good_roots:
