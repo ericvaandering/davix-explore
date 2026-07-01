@@ -295,7 +295,7 @@ def main():
     parser.add_argument('-q', '--quiet', help="Quiet mode", action="store_true")
     parser.add_argument('-m', '--max-scanners', type=int, help="Max number of scanners", default=0)
     parser.add_argument('-o', '--output-prefix', type=str, help="Output prefix", default=None)
-    parser.add_argument('-n', type=int, help="Number of partitions", default=0)
+    parser.add_argument('-n', '--partitions', type=int, help="Number of partitions", default=0)
     parser.add_argument('-c', '--config', help="Config file", metavar="FILE")
     parser.add_argument('-v', '--verbose', help="Verbose mode", action="store_true")
     parser.add_argument('-s', '--stats-file', help="Stats file", metavar="FILE")
