@@ -125,27 +125,6 @@ def validate_roots(server, server_root, root_list, timeout):
     return good_roots, failed_roots
 
 
-Usage = """
-python xrootd_scanner.py [options] <rse>
-    Options:
-    -c <config.yaml>|-c rucio   - required - read config either from a YAML file or from Rucio
-    -o <output file prefix>     - output will be sent to <output>.00000, <output>.00001, ...
-    -t <timeout>                - xrdfs ls operation timeout (default 30 seconds)
-    -m <max workers>            - default 5
-    -R <recursion depth>        - start using -R at or below this depth (dfault 3)
-    -n <nparts>
-    -k                          - do not treat individual directories scan errors as overall scan failure
-    -q                          - quiet - only print summary
-    -x                          - do not use metadata (ls -l), do not include file sizes
-    -s <stats_file>             - write final statistics to JSON file
-    -r <root count file>        - JSON file with file counds by root
-    -E <n>                      - compile empty directories only event n-th day. n > 0
-    -e <path>                   - output file for empty dits list. Use .gz extension to have it compressed
-    -e count-only               - do not produce empty dirs list, just count them
-    -T                          - turn tracing on
-"""
-
-
 # FIXME: Do I need this
 def path_to_lfn(path, path_prefix, remove_prefix, add_prefix, path_filter, rewrite_path, rewrite_out):
     # convert absoulte physical path, which starts with path_prefix to LFN
@@ -281,16 +260,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 def main():
     t0 = time.time()
 
-    parser = argparse.ArgumentParser(description="Generate a weekly activity report from Slack messages")
-    # grp = parser.add_mutually_exclusive_group()
-    # grp.add_argument("--last-week", action="store_true", default=True, help="Last Mon–Sun (default)")
-    # grp.add_argument("--this-week", action="store_true", help="Current week so far")
-    # grp.add_argument("--days", type=int, metavar="N", help="Rolling last N days")
-    # parser.add_argument("--output", "-o", metavar="FILE", help="Write report to FILE instead of stdout")
-
-    # opts, args = getopt.getopt(sys.argv[1:], "t:m:o:R:n:c:vqM:s:S:zkxe:r:E:T")
-    # opts = dict(opts)
-
+    parser = argparse.ArgumentParser(description="Scan an RSE based on the config file")
     parser.add_argument('-t', '--timeout', type=int, help="Timeout in seconds", default=3600)
     parser.add_argument('-q', '--quiet', help="Quiet mode", action="store_true")
     parser.add_argument('-m', '--max-scanners', type=int, help="Max number of scanners", default=0)
@@ -311,35 +281,31 @@ def main():
     parser.add_argument('rse', type=str, help="RSE nname")
     args = parser.parse_args()
 
-    # if len(args) != 1 or not "-c" in opts:
-    #     print("Version:", Version)
-    #     print(Usage)
-    #     sys.exit(2)
-
+    # Copy to variables we actually use
     rse = args.rse
     config = CEConfiguration(args.config)[rse]
-
     quiet = args.quiet
     display_progress = not quiet and args.verbose
-
     max_scanners = args.max_scanners or config.DavsNWorkers
     timeout = args.timeout
-
     stats_file = args.stats_file
     stats_key = args.stats_key
     ignore_directory_scan_errors = args.k
+    stats = None if not stats_file else Stats(stats_file)
+    zout = args.zip_out
+    do_trace = args.trace
+    include_sizes = config.IncludeSizes and not args.exclude_file_sizes
+
+    # Prep the files with expected counts
+    # FIXME: Not being used
     root_file_counts = args.root_file_counts
     if root_file_counts:
         root_file_counts = json.load(open(root_file_counts, "r"))
     else:
         root_file_counts = {}
 
-    stats = None if not stats_file else Stats(stats_file)
-
-    zout = args.zip_out
-    do_trace = args.trace
+    # Set up the partition files
     nparts = args.partitions or config.NPartitions
-
     if nparts > 1 and not args.output_prefix:
         print("Output prefix is required for partitioned output")
         parser.print_help(sys.stderr)
@@ -347,9 +313,7 @@ def main():
     output = args.output_prefix or "out.list"
     out_list = PartitionedList.create(nparts, output, zout)
 
-    #
-    # Do we need to compute empty dirs ?
-    #
+    # Compute empty dirs and direct to the right file
     empty_dirs_out = None
     empty_dirs_file = args.empty_dirs
     empty_dirs_count_only = (empty_dirs_file == "count-only")
@@ -359,9 +323,9 @@ def main():
 
     print("Compute empty dirs:", compute_empty_dirs)
     print("Empty dirs output:", "count only" if empty_dirs_count_only else empty_dirs_file)
-    empty_dirs_list = None
+    # empty_dirs_list = None
     if empty_dirs_file and compute_empty_dirs:
-        empty_dirs_list = []
+        # empty_dirs_list = []
         if empty_dirs_file.endswith(".gz"):
             empty_dirs_out = gzip.open(empty_dirs_file, "wt")
         else:
@@ -369,7 +333,6 @@ def main():
 
     server = config.DavsServer
     server_root = config.DavsRoot
-    include_sizes = config.IncludeSizes and not args.exclude_file_sizes
     if not server_root or not server:
         print(f"Server or server root is not defined for {rse} using DAVS. Should be defined as 'server_root'")
         sys.exit(2)
@@ -399,10 +362,9 @@ def main():
     if stats is not None:
         stats[stats_key] = my_stats
 
-    root_paths = [canonic_path(root if root.startswith("/") else server_root + "/" + root) for root in config.RootList]
+    # root_paths = [canonic_path(root if root.startswith("/") else server_root + "/" + root) for root in config.RootList]
 
     t0 = time.time()
-    # This is where the meat starts
     good_roots, failed_roots = validate_roots(server, server_root, config.RootList, timeout)
     t1 = time.time()
 
@@ -432,13 +394,10 @@ def main():
                 print(f"Scanning root {root} ...", file=sys.stderr)
                 expected = root_file_counts.get(root, 0) > 0
 
-                # pdb.set_trace()
-
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
-                # pdb.set_trace()
             except:
                 exc = traceback.format_exc()
                 print(exc)
