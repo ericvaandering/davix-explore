@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-
+import argparse
 import getopt
 import gzip
 import json
@@ -185,11 +185,10 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                   do_trace):
     n_files = 0
     n_ignored_files = 0
-    n_empty_dirs = 0
     n_dirs = 0
+    n_ignored_dirs = 0
+    n_empty_dirs = 0
     total_size = 0
-
-    ignore_list = config.IgnoreList
 
     t0 = time.time()
     root_stats = {
@@ -208,6 +207,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     remove_prefix = config.RemovePrefix
     add_prefix = config.AddPrefix
     server_root = config.DavsServer
+    ignore_list = config.IgnoreList
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
     # Use davix-ls in recursive parallel mode
@@ -226,10 +226,13 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
             # The entry is a directory
             if drwx.startswith('d'):
                 n_dirs += 1
-                if compute_empty_dirs and not int(size):
-                    n_empty_dirs += 1
-                    if empty_dirs_list is not None:
-                        empty_dirs_list.write(logpath + "\n")
+                if not file_ignored(logpath, ignore_list):
+                    if compute_empty_dirs and not int(size):
+                        n_empty_dirs += 1
+                        if empty_dirs_list is not None:
+                            empty_dirs_list.write(logpath + "\n")
+                else:
+                    n_ignored_dirs += 1
 
             # The entry is a file
             if drwx.startswith('-'):
@@ -257,11 +260,11 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         "files": n_files,
         "directories": n_dirs,
         "empty_directories": n_empty_dirs,
-        "directories_ignored": -1,
+        "directories_ignored": n_ignored_dirs,
         "files_ignored": n_ignored_files,
         "end_time": t1,
         "elapsed_time": t1 - t0,
-        "total_size_gb": total_size,
+        "total_size_gb": f'{total_size / 1e9:.1f:}',
         "servers": server_root,
         "threads": max_scanners
     })
@@ -277,28 +280,55 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
 
 def main():
     t0 = time.time()
-    opts, args = getopt.getopt(sys.argv[1:], "t:m:o:R:n:c:vqM:s:S:zkxe:r:E:T")
-    opts = dict(opts)
 
-    if len(args) != 1 or not "-c" in opts:
-        print("Version:", Version)
-        print(Usage)
-        sys.exit(2)
+    parser = argparse.ArgumentParser(description="Generate a weekly activity report from Slack messages")
+    # grp = parser.add_mutually_exclusive_group()
+    # grp.add_argument("--last-week", action="store_true", default=True, help="Last Mon–Sun (default)")
+    # grp.add_argument("--this-week", action="store_true", help="Current week so far")
+    # grp.add_argument("--days", type=int, metavar="N", help="Rolling last N days")
+    # parser.add_argument("--output", "-o", metavar="FILE", help="Write report to FILE instead of stdout")
 
-    rse = args[0]
-    config = CEConfiguration(opts["-c"])[rse]
+    # opts, args = getopt.getopt(sys.argv[1:], "t:m:o:R:n:c:vqM:s:S:zkxe:r:E:T")
+    # opts = dict(opts)
 
-    quiet = "-q" in opts
-    display_progress = not quiet and "-v" in opts
+    parser.add_argument('-t', '--timeout', type=int, help="Timeout in seconds", default=3600)
+    parser.add_argument('-q', '--quiet', help="Quiet mode", action="store_true")
+    parser.add_argument('-m', '--max-scanners', type=int, help="Max number of scanners", default=0)
+    parser.add_argument('-o', '--output-prefix', type=str, help="Output prefix", default=None)
+    parser.add_argument('-n', type=int, help="Number of partitions", default=0)
+    parser.add_argument('-c', '--config', help="Config file", metavar="FILE")
+    parser.add_argument('-v', '--verbose', help="Verbose mode", action="store_true")
+    parser.add_argument('-s', '--stats-file', help="Stats file", metavar="FILE")
+    parser.add_argument('-S', '--stats-key', type=str, help="Stats key", default="scanner")
+    parser.add_argument('-z', '--zip-out', help="Zip output file(s)", action="store_true")
+    parser.add_argument('-k', help='Ignore directory scan errors (not implemented yet)', action="store_true")
+    parser.add_argument('-x', '--exclude-file-sizes', help="Exclude file sizes", action="store_true")
+    parser.add_argument('-e', '--empty-dirs',
+                        help='Empty directory handling ("count-only" to count) or file to write a list ', type=str)
+    parser.add_argument('-r', '--root-file-counts', help="Root file counts (not implemented yet)", metavar="FILE",
+                        default=None)
+    parser.add_argument('T', '--trace', help='Turn tracing on (not implemented yet)', action="store_true")
+    parser.add_argument('rse', type=str, help="RSE nname")
+    args = parser.parse_args()
 
-    # recursive_threshold = int(opts.get("-R", config.RecursionThreshold))
-    max_scanners = int(opts.get("-m", config.DavsNWorkers))
-    timeout = int(opts.get("-t", config.DavsTimeout))
+    # if len(args) != 1 or not "-c" in opts:
+    #     print("Version:", Version)
+    #     print(Usage)
+    #     sys.exit(2)
 
-    stats_file = opts.get("-s")
-    stats_key = opts.get("-S", "scanner")
-    ignore_directory_scan_errors = "-k" in opts
-    root_file_counts = opts.get("-r")
+    rse = args.rse
+    config = CEConfiguration(args.config)[rse]
+
+    quiet = args.quiet
+    display_progress = not quiet and args.verbose
+
+    max_scanners = args.max_scanners or config.DavsNWorkers
+    timeout = args.timeout
+
+    stats_file = args.stats_file
+    stats_key = args.stats_key
+    ignore_directory_scan_errors = args.k
+    root_file_counts = args.root_file_counts
     if root_file_counts:
         root_file_counts = json.load(open(root_file_counts, "r"))
     else:
@@ -306,36 +336,29 @@ def main():
 
     stats = None if not stats_file else Stats(stats_file)
 
-    zout = "-z" in opts
-    do_trace = "-T" in opts
+    zout = args.zip_out
+    do_trace = args.trace
+    nparts = args.partitions or config.NPartitions
 
-    if "-n" in opts:
-        nparts = int(opts["-n"])
-    else:
-        nparts = config.NPartitions
-
-    if nparts > 1:
-        if not "-o" in opts:
-            print("Output prefix is required for partitioned output")
-            print(Usage)
-            sys.exit(2)
-
-    output = opts.get("-o", "out.list")
-
+    if nparts > 1 and not args.output_prefix:
+        print("Output prefix is required for partitioned output")
+        parser.print_help(sys.stderr)
+        sys.exit(2)
+    output = args.output_prefix or "out.list"
     out_list = PartitionedList.create(nparts, output, zout)
 
     #
     # Do we need to compute empty dirs ?
     #
     empty_dirs_out = None
-    empty_dirs_file = opts.get("-e")
+    empty_dirs_file = args.empty_dirs
     empty_dirs_count_only = (empty_dirs_file == "count-only")
     if empty_dirs_count_only:
         empty_dirs_file = None
     compute_empty_dirs = bool(empty_dirs_count_only or empty_dirs_file)
 
     print("Compute empty dirs:", compute_empty_dirs)
-    print("Empty dirs outut:", "count only" if empty_dirs_count_only else empty_dirs_file)
+    print("Empty dirs output:", "count only" if empty_dirs_count_only else empty_dirs_file)
     empty_dirs_list = None
     if empty_dirs_file and compute_empty_dirs:
         empty_dirs_list = []
@@ -346,7 +369,7 @@ def main():
 
     server = config.DavsServer
     server_root = config.DavsRoot
-    include_sizes = config.IncludeSizes and not "-x" in opts
+    include_sizes = config.IncludeSizes and not args.exclude_file_sizes
     if not server_root or not server:
         print(f"Server or server root is not defined for {rse} using DAVS. Should be defined as 'server_root'")
         sys.exit(2)
@@ -409,13 +432,13 @@ def main():
                 print(f"Scanning root {root} ...", file=sys.stderr)
                 expected = root_file_counts.get(root, 0) > 0
 
-                pdb.set_trace()
+                # pdb.set_trace()
 
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
                                        ignore_directory_scan_errors, include_sizes, do_trace)
-                pdb.set_trace()
+                # pdb.set_trace()
             except:
                 exc = traceback.format_exc()
                 print(exc)
