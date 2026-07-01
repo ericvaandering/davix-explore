@@ -264,7 +264,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
         "files_ignored": n_ignored_files,
         "end_time": t1,
         "elapsed_time": t1 - t0,
-        "total_size_gb": f'{total_size / 1e9:.1f:}',
+        "total_size_gb": f'{total_size / 1e9:.1f}',
         "servers": server_root,
         "threads": max_scanners
     })
