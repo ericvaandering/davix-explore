@@ -307,7 +307,7 @@ def main():
                         help='Empty directory handling ("count-only" to count) or file to write a list ', type=str)
     parser.add_argument('-r', '--root-file-counts', help="Root file counts (not implemented yet)", metavar="FILE",
                         default=None)
-    parser.add_argument('T', '--trace', help='Turn tracing on (not implemented yet)', action="store_true")
+    parser.add_argument('-T', '--trace', help='Turn tracing on (not implemented yet)', action="store_true")
     parser.add_argument('rse', type=str, help="RSE nname")
     args = parser.parse_args()
 
