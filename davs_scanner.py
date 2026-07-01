@@ -183,10 +183,11 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                   files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
                   ignore_failed_directories, include_sizes,
                   do_trace):
-    max_scanners = 32
     n_files = 0
     n_ignored_files = 0
     n_empty_dirs = 0
+    n_dirs = 0
+    total_size = 0
 
     ignore_list = config.IgnoreList
 
@@ -223,26 +224,55 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
             logpath = path_converter.path_to_logpath(path)
 
             # The entry is a directory
-            if compute_empty_dirs and drwx.startswith('d') and not int(size):
-                n_empty_dirs += 1
-                if empty_dirs_list is not None:
-                    empty_dirs_list.write(logpath + "\n")
+            if drwx.startswith('d'):
+                n_dirs += 1
+                if compute_empty_dirs and not int(size):
+                    n_empty_dirs += 1
+                    if empty_dirs_list is not None:
+                        empty_dirs_list.write(logpath + "\n")
 
             # The entry is a file
             if drwx.startswith('-'):
                 n_files += 1
                 if not file_ignored(logpath, ignore_list):
+                    total_size += int(size)
                     if files_list is not None:
                         files_list.add(logpath)
                 else:
                     n_ignored_files += 1
 
     # Check if the command executed successfully
+    failed = False
+    report_error = ''
     if process.returncode != 0:
-        print(f"\nCommand failed with exit code {process.returncode}")
-        return True
+        report_error = f"Command failed with exit code {process.returncode}"
+        failed = True
 
-    return False
+    t1 = time.time()
+
+    root_stats.update({
+        "root_failed": False,
+        "error": report_error,
+        "failed_subdirectories": -1,
+        "files": n_files,
+        "directories": n_dirs,
+        "empty_directories": n_empty_dirs,
+        "directories_ignored": -1,
+        "files_ignored": n_ignored_files,
+        "end_time": t1,
+        "elapsed_time": t1 - t0,
+        "total_size_gb": total_size,
+        "servers": server_root,
+        "threads": max_scanners
+    })
+
+    del my_stats["scanning"]
+    my_stats["roots"].append(root_stats)
+    if stats is not None:
+        stats[stats_key] = my_stats
+        if failed:
+            stats["error"] = root_stats.get("error")
+    return failed
 
 
 def main():
