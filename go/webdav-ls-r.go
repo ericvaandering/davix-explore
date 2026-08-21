@@ -2,15 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
+
+type summary struct {
+	Files            int64 `json:"files"`
+	Bytes            int64 `json:"bytes"`
+	Directories      int64 `json:"directories"`
+	EmptyDirectories int64 `json:"empty_directories"`
+}
 
 func main() {
 	var token string
@@ -64,6 +73,7 @@ func main() {
 	var printMu sync.Mutex
 	var emptyDirsMu sync.Mutex
 	var emptyDirs []string
+	var numFiles, numBytes, numDirs atomic.Int64
 
 	readDirWithRetry := func(path string) ([]os.FileInfo, error) {
 		var lastErr error
@@ -112,6 +122,15 @@ func main() {
 
 			for _, e := range entries {
 				if e.IsDir() {
+					numDirs.Add(1)
+				} else {
+					numFiles.Add(1)
+					numBytes.Add(e.Size())
+				}
+			}
+
+			for _, e := range entries {
+				if e.IsDir() {
 					wg.Add(1)
 					go func(childPath string) { jobs <- childPath }(e.(gowebdav.File).Path())
 				}
@@ -133,6 +152,18 @@ func main() {
 
 	if err := os.WriteFile("empty_dirs.out", []byte(strings.Join(emptyDirs, "\n")+"\n"), 0644); err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to write empty_dirs.out:", err)
+	}
+
+	s := summary{
+		Files:            numFiles.Load(),
+		Bytes:            numBytes.Load(),
+		Directories:      numDirs.Load(),
+		EmptyDirectories: int64(len(emptyDirs)),
+	}
+	if data, err := json.MarshalIndent(s, "", "  "); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to marshal summary:", err)
+	} else if err := os.WriteFile("ls_summary.json", data, 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to write ls_summary.json:", err)
 	}
 
 	if cause := context.Cause(ctx); cause != nil {
