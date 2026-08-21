@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,38 @@ type summary struct {
 	Bytes            int64 `json:"bytes"`
 	Directories      int64 `json:"directories"`
 	EmptyDirectories int64 `json:"empty_directories"`
+}
+
+const tokenLifetime = 30 * time.Minute
+
+// tokenManager holds the current bearer token and, when autoRefresh is set,
+// re-fetches it via UPDATE_TOKEN once it turns tokenLifetime old.
+type tokenManager struct {
+	mu          sync.Mutex
+	token       string
+	issuedAt    time.Time
+	autoRefresh bool
+}
+
+func fetchToken() (string, error) {
+	out, err := exec.Command("UPDATE_TOKEN").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (tm *tokenManager) Get() string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.autoRefresh && time.Since(tm.issuedAt) >= tokenLifetime {
+		if newToken, err := fetchToken(); err != nil {
+			fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
+		} else {
+			tm.token, tm.issuedAt = newToken, time.Now()
+		}
+	}
+	return tm.token
 }
 
 func main() {
@@ -36,11 +70,6 @@ func main() {
 
 	flag.Parse()
 
-	if token == "" {
-		fmt.Println("Missing required token: use --token or -t")
-		return
-	}
-
 	if flag.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: webdav-ls-r [--token TOKEN] [--workers N] [--retries N] server:port/directory")
 		return
@@ -55,9 +84,22 @@ func main() {
 	// 1. Initialize the client
 	c := gowebdav.NewClient("https://"+serverPort, "", "")
 
-	// 2. Set custom request headers
-	// c.SetHeader("Depth", "infinity")
-	c.SetHeader("Authorization", "Bearer "+token)
+	// 2. Set up the bearer token, auto-fetching it via UPDATE_TOKEN if not supplied.
+	tm := &tokenManager{}
+	if token == "" {
+		fetched, err := fetchToken()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to obtain token via UPDATE_TOKEN:", err)
+			return
+		}
+		tm.token, tm.issuedAt, tm.autoRefresh = fetched, time.Now(), true
+	} else {
+		tm.token = token
+	}
+
+	c.SetInterceptor(func(method string, r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+tm.Get())
+	})
 
 	// 3. Connect
 	err := c.Connect()
