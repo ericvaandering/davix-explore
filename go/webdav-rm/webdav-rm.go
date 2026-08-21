@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -93,7 +94,13 @@ func main() {
 
 			printMu.Lock()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to remove %q: %v\n", path, err)
+				var pathErr *os.PathError
+				var statusErr gowebdav.StatusError
+				if errors.As(err, &pathErr) && errors.As(pathErr.Err, &statusErr) {
+					fmt.Fprintf(os.Stderr, "Failed to remove %q: server returned HTTP status %d\n", path, statusErr.Status)
+				} else {
+					fmt.Fprintf(os.Stderr, "Failed to remove %q: %v\n", path, err)
+				}
 			} else {
 				fmt.Println("Removed:", path)
 			}
