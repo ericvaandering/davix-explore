@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -23,10 +24,6 @@ func main() {
 	var numWorkers int
 	flag.IntVar(&numWorkers, "workers", 8, "Number of concurrent scanner goroutines")
 	flag.IntVar(&numWorkers, "w", 8, "Number of concurrent scanner goroutines (shorthand)")
-
-	var retries int
-	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory before aborting")
-	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory before aborting (shorthand)")
 
 	var filePath string
 	flag.StringVar(&filePath, "file", "", "File containing paths to remove, one per line")
@@ -79,10 +76,30 @@ func main() {
 	jobs := make(chan string, 100)
 	var wg sync.WaitGroup
 	var printMu sync.Mutex
+	var numRemoved, numSkipped, numFailed atomic.Int64
 
 	worker := func() {
 		for path := range jobs {
+			entries, err := c.ReadDir(path)
+			if err != nil {
+				numFailed.Add(1)
+				printMu.Lock()
+				fmt.Fprintf(os.Stderr, "Skipping %q: failed to list: %v\n", path, err)
+				printMu.Unlock()
+				wg.Done()
+				continue
+			}
+			if len(entries) > 0 {
+				numSkipped.Add(1)
+				printMu.Lock()
+				fmt.Fprintf(os.Stderr, "Skipping %q: not empty (%d entries)\n", path, len(entries))
+				printMu.Unlock()
+				wg.Done()
+				continue
+			}
+
 			if dryRun {
+				numRemoved.Add(1)
 				printMu.Lock()
 				fmt.Println("Would remove:", path)
 				printMu.Unlock()
@@ -90,18 +107,19 @@ func main() {
 				continue
 			}
 
-			err := c.Remove(path)
+			err = c.Remove(path)
 
 			printMu.Lock()
 			if err != nil {
-				var pathErr *os.PathError
+				numFailed.Add(1)
 				var statusErr gowebdav.StatusError
-				if errors.As(err, &pathErr) && errors.As(pathErr.Err, &statusErr) {
+				if errors.As(err, &statusErr) {
 					fmt.Fprintf(os.Stderr, "Failed to remove %q: server returned HTTP status %d\n", path, statusErr.Status)
 				} else {
 					fmt.Fprintf(os.Stderr, "Failed to remove %q: %v\n", path, err)
 				}
 			} else {
+				numRemoved.Add(1)
 				fmt.Println("Removed:", path)
 			}
 			printMu.Unlock()
@@ -130,4 +148,15 @@ func main() {
 
 	close(jobs)
 	wg.Wait()
+
+	removedLabel := "removed"
+	if dryRun {
+		removedLabel = "would remove"
+	}
+	fmt.Printf("\n%s: %d, skipped (not empty): %d, failed: %d\n",
+		removedLabel, numRemoved.Load(), numSkipped.Load(), numFailed.Load())
+
+	if numFailed.Load() > 0 {
+		os.Exit(1)
+	}
 }
