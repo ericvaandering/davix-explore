@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -11,6 +16,15 @@ func main() {
 	var token string
 	flag.StringVar(&token, "token", "", "Bearer token for Authorization header")
 	flag.StringVar(&token, "t", "", "Bearer token for Authorization header (shorthand)")
+
+	var numWorkers int
+	flag.IntVar(&numWorkers, "workers", 8, "Number of concurrent scanner goroutines")
+	flag.IntVar(&numWorkers, "w", 8, "Number of concurrent scanner goroutines (shorthand)")
+
+	var retries int
+	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory before aborting")
+	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory before aborting (shorthand)")
+
 	flag.Parse()
 
 	if token == "" {
@@ -18,21 +32,111 @@ func main() {
 		return
 	}
 
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: webdav-ls-r [--token TOKEN] [--workers N] [--retries N] server:port/directory")
+		return
+	}
+
+	serverPort, dirPath, found := strings.Cut(flag.Arg(0), "/")
+	directory := "/"
+	if found {
+		directory += dirPath
+	}
+
 	// 1. Initialize the client
-	c := gowebdav.NewClient("https://webdav.example.com", "user", "password")
+	c := gowebdav.NewClient("https://"+serverPort, "", "")
 
 	// 2. Set custom request headers
-	c.SetHeader("Depth", "infinity")
+	// c.SetHeader("Depth", "infinity")
 	c.SetHeader("Authorization", "Bearer "+token)
 
-	// 3. Connect and execute operations
+	// 3. Connect
 	err := c.Connect()
 	if err != nil {
 		fmt.Println("Connection failed:", err)
 		return
 	}
 
-	// Your headers will be sent automatically with this call
-	files, _ := c.ReadDir("/")
-	fmt.Println(files)
+	// 4. Recursively scan the tree with a pool of worker goroutines.
+	ctx, cancel := context.WithCancelCause(context.Background())
+	jobs := make(chan string, 100)
+	var wg sync.WaitGroup
+	var printMu sync.Mutex
+	var emptyDirsMu sync.Mutex
+	var emptyDirs []string
+
+	readDirWithRetry := func(path string) ([]os.FileInfo, error) {
+		var lastErr error
+		for attempt := 0; attempt <= retries; attempt++ {
+			if attempt > 0 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			entries, err := c.ReadDir(path)
+			if err == nil {
+				return entries, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
+	}
+
+	worker := func() {
+		for path := range jobs {
+			if ctx.Err() != nil {
+				wg.Done()
+				continue
+			}
+
+			entries, err := readDirWithRetry(path)
+			if err != nil {
+				cancel(fmt.Errorf("giving up on %q after %d retries: %w", path, retries, err))
+				wg.Done()
+				continue
+			}
+
+			if len(entries) == 0 {
+				emptyDirsMu.Lock()
+				emptyDirs = append(emptyDirs, path)
+				emptyDirsMu.Unlock()
+			}
+
+			printMu.Lock()
+			for _, e := range entries {
+				kind := "file"
+				if e.IsDir() {
+					kind = "dir"
+				}
+				fmt.Printf("%-4s %10d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
+			}
+			printMu.Unlock()
+
+			for _, e := range entries {
+				if e.IsDir() {
+					wg.Add(1)
+					go func(childPath string) { jobs <- childPath }(e.(gowebdav.File).Path())
+				}
+			}
+
+			wg.Done()
+		}
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		go worker()
+	}
+
+	wg.Add(1)
+	jobs <- directory
+
+	wg.Wait()
+	close(jobs)
+
+	if err := os.WriteFile("empty_dirs.out", []byte(strings.Join(emptyDirs, "\n")+"\n"), 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to write empty_dirs.out:", err)
+	}
+
+	if cause := context.Cause(ctx); cause != nil {
+		fmt.Fprintln(os.Stderr, "Scan aborted:", cause)
+		os.Exit(1)
+	}
 }
