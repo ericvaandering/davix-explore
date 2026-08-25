@@ -154,11 +154,11 @@ func main() {
 
 			printMu.Lock()
 			for _, e := range entries {
-				kind := "file"
+				kind := "-rwxrwxrwx" // Make it look like a regular file by default
 				if e.IsDir() {
-					kind = "dir"
+					kind = "drwxrwxrwx" // Make it look like a directory
 				}
-				fmt.Printf("%-4s %10d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
+				fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
 			}
 			printMu.Unlock()
 
