@@ -26,27 +26,36 @@ type summary struct {
 const tokenLifetime = 30 * time.Minute
 
 // tokenManager holds the current bearer token and, when autoRefresh is set,
-// re-fetches it via UPDATE_TOKEN once it turns tokenLifetime old.
+// re-fetches it via gfal-token once it turns tokenLifetime old.
 type tokenManager struct {
 	mu          sync.Mutex
+	serverPort  string
+	directory   string
 	token       string
 	issuedAt    time.Time
 	autoRefresh bool
 }
 
-func fetchToken() (string, error) {
-	out, err := exec.Command("UPDATE_TOKEN").Output()
+func fetchToken(serverPort, directory string) (string, error) {
+	fmt.Fprintln(os.Stderr, "Getting token for "+"https://"+serverPort+directory)
+	out, err := exec.Command("gfal-token", "https://"+serverPort+directory).Output()
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	token := strings.TrimSpace(string(out))
+	if len(token) > 20 {
+		fmt.Fprintf(os.Stderr, "Got token %s...%s\n", token[:6], token[len(token)-6:])
+	} else {
+		fmt.Fprintf(os.Stderr, "Got token of length %d\n", len(token))
+	}
+	return token, nil
 }
 
 func (tm *tokenManager) Get() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.autoRefresh && time.Since(tm.issuedAt) >= tokenLifetime {
-		if newToken, err := fetchToken(); err != nil {
+		if newToken, err := fetchToken(tm.serverPort, tm.directory); err != nil {
 			fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
 		} else {
 			tm.token, tm.issuedAt = newToken, time.Now()
@@ -84,12 +93,12 @@ func main() {
 	// 1. Initialize the client
 	c := gowebdav.NewClient("https://"+serverPort, "", "")
 
-	// 2. Set up the bearer token, auto-fetching it via UPDATE_TOKEN if not supplied.
-	tm := &tokenManager{}
+	// 2. Set up the bearer token, auto-fetching it via gfal-token if not supplied.
+	tm := &tokenManager{serverPort: serverPort, directory: directory}
 	if token == "" {
-		fetched, err := fetchToken()
+		fetched, err := fetchToken(serverPort, directory)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Failed to obtain token via UPDATE_TOKEN:", err)
+			fmt.Fprintln(os.Stderr, "Failed to obtain token via gfal-token:", err)
 			return
 		}
 		tm.token, tm.issuedAt, tm.autoRefresh = fetched, time.Now(), true
@@ -121,6 +130,7 @@ func main() {
 		var lastErr error
 		for attempt := 0; attempt <= retries; attempt++ {
 			if attempt > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: retrying %q (attempt %d of %d) after error: %v\n", path, attempt, retries, lastErr)
 				time.Sleep(500 * time.Millisecond)
 			}
 			entries, err := c.ReadDir(path)
@@ -129,6 +139,7 @@ func main() {
 			}
 			lastErr = err
 		}
+		fmt.Fprintf(os.Stderr, "Warning: exhausted %d retries on %q, last error: %v\n", retries, path, lastErr)
 		return nil, lastErr
 	}
 
@@ -154,11 +165,11 @@ func main() {
 
 			printMu.Lock()
 			for _, e := range entries {
-				kind := "file"
+				kind := "-rwxrwxrwx" // Make it look like a regular file by default
 				if e.IsDir() {
-					kind = "dir"
+					kind = "drwxrwxrwx" // Make it look like a directory
 				}
-				fmt.Printf("%-4s %10d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
+				fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
 			}
 			printMu.Unlock()
 
