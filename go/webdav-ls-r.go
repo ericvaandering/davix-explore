@@ -37,6 +37,7 @@ type tokenManager struct {
 }
 
 func fetchToken(serverPort, directory string) (string, error) {
+	fmt.Fprintln(os.Stderr, "Getting token for "+"https://"+serverPort+directory)
 	out, err := exec.Command("gfal-token", "https://"+serverPort+directory).Output()
 	if err != nil {
 		return "", err
