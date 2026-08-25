@@ -26,16 +26,18 @@ type summary struct {
 const tokenLifetime = 30 * time.Minute
 
 // tokenManager holds the current bearer token and, when autoRefresh is set,
-// re-fetches it via UPDATE_TOKEN once it turns tokenLifetime old.
+// re-fetches it via gfal-token once it turns tokenLifetime old.
 type tokenManager struct {
 	mu          sync.Mutex
+	serverPort  string
+	directory   string
 	token       string
 	issuedAt    time.Time
 	autoRefresh bool
 }
 
-func fetchToken() (string, error) {
-	out, err := exec.Command("UPDATE_TOKEN").Output()
+func fetchToken(serverPort, directory string) (string, error) {
+	out, err := exec.Command("gfal-token", "https://"+serverPort+directory).Output()
 	if err != nil {
 		return "", err
 	}
@@ -46,7 +48,7 @@ func (tm *tokenManager) Get() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.autoRefresh && time.Since(tm.issuedAt) >= tokenLifetime {
-		if newToken, err := fetchToken(); err != nil {
+		if newToken, err := fetchToken(tm.serverPort, tm.directory); err != nil {
 			fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
 		} else {
 			tm.token, tm.issuedAt = newToken, time.Now()
@@ -84,12 +86,12 @@ func main() {
 	// 1. Initialize the client
 	c := gowebdav.NewClient("https://"+serverPort, "", "")
 
-	// 2. Set up the bearer token, auto-fetching it via UPDATE_TOKEN if not supplied.
-	tm := &tokenManager{}
+	// 2. Set up the bearer token, auto-fetching it via gfal-token if not supplied.
+	tm := &tokenManager{serverPort: serverPort, directory: directory}
 	if token == "" {
-		fetched, err := fetchToken()
+		fetched, err := fetchToken(serverPort, directory)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Failed to obtain token via UPDATE_TOKEN:", err)
+			fmt.Fprintln(os.Stderr, "Failed to obtain token via gfal-token:", err)
 			return
 		}
 		tm.token, tm.issuedAt, tm.autoRefresh = fetched, time.Now(), true
