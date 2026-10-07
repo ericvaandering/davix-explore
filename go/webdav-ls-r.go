@@ -42,7 +42,13 @@ func fetchToken(serverPort, directory string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	token := strings.TrimSpace(string(out))
+	if len(token) > 20 {
+		fmt.Fprintf(os.Stderr, "Got token %s...%s\n", token[:6], token[len(token)-6:])
+	} else {
+		fmt.Fprintf(os.Stderr, "Got token of length %d\n", len(token))
+	}
+	return token, nil
 }
 
 func (tm *tokenManager) Get() string {
@@ -124,6 +130,7 @@ func main() {
 		var lastErr error
 		for attempt := 0; attempt <= retries; attempt++ {
 			if attempt > 0 {
+				fmt.Fprintf(os.Stderr, "Warning: retrying %q (attempt %d of %d) after error: %v\n", path, attempt, retries, lastErr)
 				time.Sleep(500 * time.Millisecond)
 			}
 			entries, err := c.ReadDir(path)
@@ -132,6 +139,7 @@ func main() {
 			}
 			lastErr = err
 		}
+		fmt.Fprintf(os.Stderr, "Warning: exhausted %d retries on %q, last error: %v\n", retries, path, lastErr)
 		return nil, lastErr
 	}
 
