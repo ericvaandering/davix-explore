@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"davix-explore/internal/webdavsafe"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -26,36 +26,6 @@ type summary struct {
 }
 
 const tokenLifetime = 30 * time.Minute
-
-// truncationGuard wraps a RoundTripper and fully buffers each response body
-// before handing it back.
-//
-// gowebdav's XML parser ignores decoder errors -- parseXML in utils.go reads
-// tokens with `t, _ := decoder.Token()` -- so a response body cut short by a
-// timeout or a dropped connection parses as a *successful* listing with zero
-// entries. This program would then record that directory as empty and write it
-// to empty_dirs.out, which is the input to webdav-rm. Reading the body here
-// turns that silence into a real error that readDirWithRetry can retry on.
-//
-// The cost is holding one PROPFIND response per worker in memory rather than
-// streaming it, which is the same data parseXML was going to consume anyway.
-type truncationGuard struct {
-	rt http.RoundTripper
-}
-
-func (g truncationGuard) RoundTrip(r *http.Request) (*http.Response, error) {
-	resp, err := g.rt.RoundTrip(r)
-	if err != nil {
-		return nil, err
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	return resp, nil
-}
 
 // tokenManager holds the current bearer token and, when autoRefresh is set,
 // re-fetches it via gfal-token once it turns tokenLifetime old.
@@ -136,13 +106,15 @@ func main() {
 	// transport catches a server that stops responding, while SetTimeout caps
 	// the whole request. Keep the overall cap generous -- it covers reading the
 	// response body too, and a PROPFIND on a large directory is legitimately slow.
+	// webdavsafe.Transport additionally rejects truncated listings, which would
+	// otherwise be recorded as empty directories in empty_dirs.out.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = responseTimeout
 	if numWorkers > 0 {
 		// Default is 2, which would make most workers reconnect on every listing.
 		transport.MaxIdleConnsPerHost = numWorkers
 	}
-	c.SetTransport(truncationGuard{rt: transport})
+	c.SetTransport(webdavsafe.NewTransport(transport))
 	c.SetTimeout(timeout)
 
 	// 2. Set up the bearer token, auto-fetching it via gfal-token if not supplied.
