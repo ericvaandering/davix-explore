@@ -92,6 +92,18 @@ func main() {
 		return
 	}
 
+	// Reject counts that would make the scan silently wrong rather than slow:
+	// a negative retry budget skips the listing loop entirely, and a worker
+	// pool of zero leaves nothing to drain the job queue.
+	if retries < 0 {
+		fmt.Fprintf(os.Stderr, "Invalid --retries %d: must be zero or greater\n", retries)
+		os.Exit(2)
+	}
+	if numWorkers < 1 {
+		fmt.Fprintf(os.Stderr, "Invalid --workers %d: must be at least 1\n", numWorkers)
+		os.Exit(2)
+	}
+
 	serverPort, dirPath, found := strings.Cut(flag.Arg(0), "/")
 	directory := "/"
 	if found {
@@ -150,6 +162,10 @@ func main() {
 	var emptyDirs []string
 	var numFiles, numBytes, numDirs atomic.Int64
 
+	// readDirWithRetry must never return (nil, nil): the caller reads an empty
+	// listing with no error as "this directory is empty" and writes the path to
+	// empty_dirs.out, which is the input to webdav-rm. Every exit from this
+	// function therefore carries either entries or a non-nil error.
 	readDirWithRetry := func(path string) ([]os.FileInfo, error) {
 		var lastErr error
 		for attempt := 0; attempt <= retries; attempt++ {
@@ -162,6 +178,12 @@ func main() {
 				return entries, nil
 			}
 			lastErr = err
+		}
+		if lastErr == nil {
+			// Unreachable while retries >= 0 is enforced at startup, but the
+			// consequence of falling through with a nil error is a wrongly
+			// deleted directory, so fail closed instead of trusting that.
+			lastErr = fmt.Errorf("no listing attempt was made for %q (retries=%d)", path, retries)
 		}
 		fmt.Fprintf(os.Stderr, "Warning: exhausted %d retries on %q, last error: %v\n", retries, path, lastErr)
 		return nil, lastErr
