@@ -4,10 +4,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"davix-explore/internal/webdavsafe"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -36,6 +40,12 @@ func main() {
 	var dryRun bool
 	flag.BoolVar(&dryRun, "dry-run", false, "Print what would be removed without actually deleting anything")
 
+	var timeout time.Duration
+	flag.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall time limit for a single request, including reading the response (0 disables)")
+
+	var responseTimeout time.Duration
+	flag.DurationVar(&responseTimeout, "response-timeout", 60*time.Second, "Time limit for the server to send response headers (0 disables)")
+
 	flag.Parse()
 
 	if server == "" {
@@ -50,6 +60,20 @@ func main() {
 
 	// 1. Initialize the client
 	c := gowebdav.NewClient("https://"+server, "", "")
+
+	// gowebdav's default client has no timeouts, and a listing cut short by a
+	// stalled connection parses as an empty directory -- which this program
+	// treats as permission to DELETE. webdavsafe.Transport turns a truncated
+	// listing into an error; the timeouts stop a hung request from parking a
+	// worker forever.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseTimeout
+	if numWorkers > 0 {
+		// Default is 2, which would make most workers reconnect on every listing.
+		transport.MaxIdleConnsPerHost = numWorkers
+	}
+	c.SetTransport(webdavsafe.NewTransport(transport))
+	c.SetTimeout(timeout)
 
 	// 2. Set custom request headers
 	// c.SetHeader("Depth", "infinity")
@@ -102,6 +126,25 @@ func main() {
 				numRemoved.Add(1)
 				printMu.Lock()
 				fmt.Println("Would remove:", path)
+				printMu.Unlock()
+				wg.Done()
+				continue
+			}
+
+			// c.Remove issues a bare DELETE, which RFC 4918 defines as
+			// recursive on a collection: the emptiness check above is the only
+			// thing standing between a bad listing and a deleted tree. Confirm
+			// it once more against a fresh listing so a stale or truncated
+			// result cannot authorize the delete.
+			confirm, confirmErr := c.ReadDir(path)
+			if confirmErr != nil || len(confirm) > 0 {
+				numFailed.Add(1)
+				printMu.Lock()
+				if confirmErr != nil {
+					fmt.Fprintf(os.Stderr, "Skipping %q: could not confirm it is empty: %v\n", path, confirmErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "Skipping %q: became non-empty (%d entries) before delete\n", path, len(confirm))
+				}
 				printMu.Unlock()
 				wg.Done()
 				continue
