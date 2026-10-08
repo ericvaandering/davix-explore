@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,60 @@ type summary struct {
 }
 
 const tokenLifetime = 30 * time.Minute
+
+// parseTarget splits a scan target into its host:port and absolute directory.
+//
+// The surrounding tooling speaks davs:// URLs -- davs_scanner.py builds them
+// that way -- so accept a scheme and strip it rather than letting
+// strings.Cut("davs://host/path", "/") produce a host of "davs:" and a
+// directory of "//host/path". Everything is addressed over https regardless.
+func parseTarget(target string) (serverPort, directory string, err error) {
+	if i := strings.Index(target, "://"); i >= 0 {
+		switch scheme := strings.ToLower(target[:i]); scheme {
+		case "davs", "https", "dav", "http", "webdav":
+			target = target[i+3:]
+		default:
+			return "", "", fmt.Errorf("unsupported scheme %q in %q", scheme, target)
+		}
+	}
+
+	serverPort, dirPath, found := strings.Cut(target, "/")
+	if serverPort == "" {
+		return "", "", fmt.Errorf("missing server:port in %q", target)
+	}
+	directory = "/"
+	if found {
+		directory += dirPath
+	}
+	return serverPort, directory, nil
+}
+
+// writeFileAtomic writes data to a temporary file in the same directory and
+// renames it into place, so a reader never observes a partly-written file and
+// a failed write leaves the previous contents intact.
+func writeFileAtomic(name string, data []byte) error {
+	dir := filepath.Dir(name)
+	f, err := os.CreateTemp(dir, filepath.Base(name)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // No-op once the rename below succeeds.
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	// Match os.WriteFile's 0644 rather than CreateTemp's 0600.
+	if err := f.Chmod(0644); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, name)
+}
 
 // tokenManager holds the current bearer token and, when autoRefresh is set,
 // re-fetches it via gfal-token once it turns tokenLifetime old.
@@ -89,7 +144,7 @@ func main() {
 
 	if flag.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "Usage: webdav-ls-r [--token TOKEN] [--workers N] [--retries N] [--timeout D] [--response-timeout D] server:port/directory")
-		return
+		os.Exit(2)
 	}
 
 	// Reject counts that would make the scan silently wrong rather than slow:
@@ -104,10 +159,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	serverPort, dirPath, found := strings.Cut(flag.Arg(0), "/")
-	directory := "/"
-	if found {
-		directory += dirPath
+	serverPort, directory, err := parseTarget(flag.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Invalid target:", err)
+		os.Exit(2)
 	}
 
 	// 1. Initialize the client
@@ -135,7 +190,7 @@ func main() {
 		fetched, err := fetchToken(serverPort, directory)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Failed to obtain token via gfal-token:", err)
-			return
+			os.Exit(1)
 		}
 		tm.token, tm.issuedAt, tm.autoRefresh = fetched, time.Now(), true
 	} else {
@@ -146,11 +201,11 @@ func main() {
 		r.Header.Set("Authorization", "Bearer "+tm.Get())
 	})
 
-	// 3. Connect
-	err := c.Connect()
-	if err != nil {
-		fmt.Println("Connection failed:", err)
-		return
+	// 3. Connect. Diagnostics go to stderr: stdout carries the listing, which
+	// davs_scanner.py parses positionally with line.split().
+	if err := c.Connect(); err != nil {
+		fmt.Fprintln(os.Stderr, "Connection failed:", err)
+		os.Exit(1)
 	}
 
 	// 4. Recursively scan the tree with a pool of worker goroutines.
@@ -249,8 +304,21 @@ func main() {
 	wg.Wait()
 	close(jobs)
 
-	if err := os.WriteFile("empty_dirs.out", []byte(strings.Join(emptyDirs, "\n")+"\n"), 0644); err != nil {
+	// An aborted scan has only walked part of the tree, so its results describe
+	// nothing in particular. Leave the previous run's files in place rather
+	// than replacing them with a truncated list that still looks authoritative
+	// -- empty_dirs.out is the input to webdav-rm.
+	if cause := context.Cause(ctx); cause != nil {
+		fmt.Fprintln(os.Stderr, "Scan aborted:", cause)
+		fmt.Fprintln(os.Stderr, "Results are incomplete; empty_dirs.out and ls_summary.json were left unchanged.")
+		os.Exit(1)
+	}
+
+	failed := false
+
+	if err := writeFileAtomic("empty_dirs.out", []byte(strings.Join(emptyDirs, "\n")+"\n")); err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to write empty_dirs.out:", err)
+		failed = true
 	}
 
 	s := summary{
@@ -261,12 +329,13 @@ func main() {
 	}
 	if data, err := json.MarshalIndent(s, "", "  "); err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to marshal summary:", err)
-	} else if err := os.WriteFile("ls_summary.json", data, 0644); err != nil {
+		failed = true
+	} else if err := writeFileAtomic("ls_summary.json", data); err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to write ls_summary.json:", err)
+		failed = true
 	}
 
-	if cause := context.Cause(ctx); cause != nil {
-		fmt.Fprintln(os.Stderr, "Scan aborted:", cause)
+	if failed {
 		os.Exit(1)
 	}
 }
