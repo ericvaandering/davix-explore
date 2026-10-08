@@ -26,7 +26,14 @@ type summary struct {
 	EmptyDirectories int64 `json:"empty_directories"`
 }
 
+// tokenLifetime is how long a gfal-token token is assumed good for. It is a
+// guess -- the real lifetime is set by the issuer -- so it only drives
+// proactive renewal; an actual 401 refreshes the token regardless.
 const tokenLifetime = 30 * time.Minute
+
+// maxTokenRefreshes bounds how many times one listing may renew its token
+// before giving up, since a renewal does not consume a retry attempt.
+const maxTokenRefreshes = 2
 
 // parseTarget splits a scan target into its host:port and absolute directory.
 //
@@ -83,7 +90,15 @@ func writeFileAtomic(name string, data []byte) error {
 }
 
 // tokenManager holds the current bearer token and, when autoRefresh is set,
-// re-fetches it via gfal-token once it turns tokenLifetime old.
+// re-fetches it via gfal-token.
+//
+// Refresh is driven by the server rather than by the clock. Nothing tells us
+// how long gfal-token's token is actually good for -- tokenLifetime is only a
+// guess -- so a token that expires early would otherwise produce 401s that the
+// retry loop burns its whole budget on without ever fixing. Refresh() lets a
+// caller that sees a 401 replace the token and try again; the tokenLifetime
+// timer stays as a proactive backstop so a long scan usually renews before the
+// server rejects anything.
 type tokenManager struct {
 	mu          sync.Mutex
 	serverPort  string
@@ -91,6 +106,9 @@ type tokenManager struct {
 	token       string
 	issuedAt    time.Time
 	autoRefresh bool
+
+	// fetch obtains a fresh token. Nil means fetchToken; tests substitute it.
+	fetch func(serverPort, directory string) (string, error)
 }
 
 func fetchToken(serverPort, directory string) (string, error) {
@@ -108,17 +126,66 @@ func fetchToken(serverPort, directory string) (string, error) {
 	return token, nil
 }
 
+// Get returns the current token, proactively renewing it once it reaches
+// tokenLifetime.
 func (tm *tokenManager) Get() string {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.autoRefresh && time.Since(tm.issuedAt) >= tokenLifetime {
-		if newToken, err := fetchToken(tm.serverPort, tm.directory); err != nil {
-			fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
-		} else {
-			tm.token, tm.issuedAt = newToken, time.Now()
-		}
+		tm.refreshLocked(tm.token)
 	}
 	return tm.token
+}
+
+// Current returns the token without considering a renewal, so a caller can
+// record which token a request used and pass it to Refresh on a 401.
+func (tm *tokenManager) Current() string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.token
+}
+
+// Refresh re-fetches the token after the server rejected one, and reports
+// whether the caller should retry. stale is the token the caller used; if it
+// no longer matches, another goroutine already refreshed and the caller can
+// retry immediately rather than fetching again.
+//
+// Returns false when auto-refresh is off (the token came from --token, so
+// there is nothing to re-fetch) or when gfal-token failed.
+func (tm *tokenManager) Refresh(stale string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if !tm.autoRefresh {
+		return false
+	}
+	if tm.token != stale {
+		return true
+	}
+	return tm.refreshLocked(stale)
+}
+
+// refreshLocked re-fetches the token. tm.mu must be held.
+//
+// Holding the lock across gfal-token serialises every worker behind one fetch,
+// which is deliberate: it collapses a refresh stampede into a single
+// subprocess instead of one per in-flight request.
+func (tm *tokenManager) refreshLocked(stale string) bool {
+	// Record the attempt even when it fails. Otherwise a token past
+	// tokenLifetime whose refresh keeps failing re-execs gfal-token on every
+	// single request, under this lock, for the rest of the scan.
+	tm.issuedAt = time.Now()
+
+	fetch := tm.fetch
+	if fetch == nil {
+		fetch = fetchToken
+	}
+	newToken, err := fetch(tm.serverPort, tm.directory)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
+		return false
+	}
+	tm.token = newToken
+	return newToken != stale
 }
 
 func main() {
@@ -223,16 +290,40 @@ func main() {
 	// function therefore carries either entries or a non-nil error.
 	readDirWithRetry := func(path string) ([]os.FileInfo, error) {
 		var lastErr error
+		// Token renewals do not consume a retry attempt, so bound them
+		// separately: a server that keeps rejecting freshly issued tokens
+		// would otherwise loop forever.
+		tokenRefreshes := 0
 		for attempt := 0; attempt <= retries; attempt++ {
 			if attempt > 0 {
 				fmt.Fprintf(os.Stderr, "Warning: retrying %q (attempt %d of %d) after error: %v\n", path, attempt, retries, lastErr)
 				time.Sleep(500 * time.Millisecond)
 			}
+
+			// Note which token this attempt will use, so a 401 refreshes that
+			// token rather than one a concurrent worker already replaced.
+			used := tm.Current()
+
 			entries, err := c.ReadDir(path)
 			if err == nil {
 				return entries, nil
 			}
 			lastErr = err
+
+			// A 401 means the token expired, which no amount of retrying
+			// fixes. Renew it and retry without spending an attempt: the
+			// request was never really tried with a valid credential.
+			if gowebdav.IsErrCode(err, http.StatusUnauthorized) {
+				if tokenRefreshes < maxTokenRefreshes && tm.Refresh(used) {
+					tokenRefreshes++
+					fmt.Fprintf(os.Stderr, "Notice: refreshed token after 401 on %q, retrying\n", path)
+					attempt--
+					continue
+				}
+				// Either we could not get a new token or the server keeps
+				// rejecting fresh ones; further retries will not help.
+				break
+			}
 		}
 		if lastErr == nil {
 			// Unreachable while retries >= 0 is enforced at startup, but the
