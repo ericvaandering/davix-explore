@@ -126,7 +126,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                    '--capath', '/cvmfs/grid.cern.ch/etc/grid-security/certificates/',
                    '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
     else:
-        command = ['webdav-ls-r', '-w', f'{max_scanners}', {server_root}/{root}]
+        command = ['webdav-ls-r', '-w', f'{max_scanners}', f'{server_root}/{root}']
 
     # FIXME: This does not worry about the list of all directories since we discard that from the very beginning
     # FIXME: It could be added.
