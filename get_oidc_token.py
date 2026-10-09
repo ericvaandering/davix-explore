@@ -21,11 +21,9 @@ using only the contents of ``idpsecrets.json``: the admin client registration is
 read from that file, the token endpoint is discovered from the issuer, and a
 token is requested for a given audience and scope.
 
-It is deliberately stand-alone -- the ``--audience``/``--scope`` and ``--fts``
-modes need nothing but ``requests`` and the secrets file, so it can be run on a
-host that has no Rucio installation and no database access.  Deriving the
-audience and scope from an RSE (``--rse``) additionally needs the Rucio client
-to be importable and configured, since that information lives in the server.
+It is deliberately stand-alone -- it needs nothing but ``requests`` and the
+secrets file, so it can be run on a host that has no Rucio installation and no
+database access.
 
 Examples
 --------
@@ -33,12 +31,9 @@ Examples
     get_oidc_token.py --audience https://storage.example.org \\
                             --scope 'storage.read:/ offline_access'
 
-    # A token to authenticate against an FTS instance.
-    get_oidc_token.py --fts https://fts.example.org:8446
-
-    # The token the submitter would attach as a source token for an RSE,
-    # and show its claims instead of the raw token.
-    get_oidc_token.py --rse MY_RSE --operation read --decode
+    # Show the claims instead of the raw token.
+    get_oidc_token.py --audience https://storage.example.org \\
+                            --scope 'storage.read:/' --decode
 
 It can also be imported, in which case ``get_token()`` is the entry point:
 
@@ -63,28 +58,6 @@ import sys
 from typing import Any, Optional
 
 import requests
-
-# Mirrors rucio.core.oidc: the scopes requested for each kind of operation.
-# The `storage.read` on a write is a workaround for StoRM, which requires it in
-# order to stat the destination.  `offline_access` is requested for transfers so
-# that FTS can renew the token, but not for deletions, which are short-lived.
-OPERATIONS: dict[str, dict[str, Any]] = {
-    'read': {
-        'scopes': ['storage.read'],
-        'extra_scopes': ['offline_access'],
-        'help': 'read a replica (FTS source token)',
-    },
-    'write': {
-        'scopes': ['storage.modify', 'storage.read'],
-        'extra_scopes': ['offline_access'],
-        'help': 'write a replica (FTS destination token)',
-    },
-    'delete': {
-        'scopes': ['storage.modify', 'storage.read'],
-        'extra_scopes': [],
-        'help': 'delete a replica (reaper token)',
-    },
-}
 
 DEFAULT_TIMEOUT = 30
 
@@ -300,51 +273,6 @@ def get_token(audience: str, scope: str, idpsecrets: Optional[str] = None,
                          client['client_secret'], audience, scope)
 
 
-def rse_audience_and_scope(rse: str, scopes: list[str],
-                           extra_scopes: list[str]) -> tuple[str, str]:
-    """Build the audience and scope claims for an RSE.
-
-    Reproduces ``determine_audience_for_rse`` and ``determine_scope_for_rse``,
-    but over the Rucio client rather than the database.  Token support is
-    exclusive to WebDAV, so only ``davs`` protocols contribute.
-    """
-    try:
-        from rucio.client.rseclient import RSEClient
-    except ImportError as error:
-        raise TokenError('--rse needs the Rucio client to be importable: %s' % error) from error
-
-    client = RSEClient()
-    attributes = client.list_rse_attributes(rse)
-    if attributes.get('oidc_support') is not True:
-        print('warning: RSE %s does not have oidc_support set; Rucio itself would '
-              'not use a token here' % rse, file=sys.stderr)
-
-    protocols = client.get_protocols(rse)
-    # get_protocols() collapses a single match into a bare dict.
-    if isinstance(protocols, dict):
-        protocols = [protocols]
-
-    davs = [p for p in protocols if p.get('scheme') == 'davs']
-    if not davs:
-        raise TokenError('RSE %s has no davs protocol, so it cannot use tokens' % rse)
-
-    audience = ' '.join(sorted({p['hostname'] for p in davs}))
-
-    # Storages typically map an issuer (i.e. a VO) onto a particular area.  If
-    # so, the path to that area is a base which has to come off the prefix, so
-    # that '/' means the whole resource associated with that issuer.
-    base_path = attributes.get('oidc_base_path')
-    prefixes = set()
-    for protocol in davs:
-        prefix = protocol['prefix']
-        if base_path:
-            prefix = prefix[len(base_path):] if prefix.startswith(base_path) else prefix
-        prefixes.add(prefix)
-
-    all_scopes = [f'{s}:{p}' for s in scopes for p in prefixes] + list(extra_scopes)
-    return audience, ' '.join(sorted(all_scopes))
-
-
 def decode_claims(token: str) -> dict[str, Any]:
     """Decode a JWT payload without verifying it.
 
@@ -369,7 +297,6 @@ def cache_key(audience: str, scope: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    operations = ', '.join(f'{name} ({spec["help"]})' for name, spec in OPERATIONS.items())
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -385,16 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     target = parser.add_argument_group(
         'target',
-        'What the token is for.  Give either --rse, --fts, or --audience with --scope.')
-    target.add_argument('--rse', metavar='RSE',
-                        help='derive the audience and scope from an RSE, as the '
-                             'submitter and reaper do (needs the Rucio client)')
-    target.add_argument('--operation', choices=sorted(OPERATIONS), default='read',
-                        help='the operation the --rse token is for: %s (default: read)'
-                             % operations)
-    target.add_argument('--fts', metavar='URL',
-                        help='request a token for an FTS instance: audience is the '
-                             'hostname of URL, scope is "fts"')
+        'What the token is for.  Give --audience with --scope.')
     target.add_argument('--audience', metavar='AUDIENCE',
                         help='the audience to request')
     target.add_argument('--scope', metavar='SCOPE',
@@ -411,29 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_target(args: argparse.Namespace) -> tuple[str, str]:
     """Work out the audience and scope from the command line."""
-    chosen = [name for name in ('rse', 'fts', 'audience') if getattr(args, name)]
-    if len(chosen) > 1:
-        raise TokenError('--rse, --fts and --audience are mutually exclusive')
-
-    if args.rse:
-        spec = OPERATIONS[args.operation]
-        return rse_audience_and_scope(args.rse, spec['scopes'], spec['extra_scopes'])
-
-    if args.fts:
-        # The transfertool takes the bare hostname, without scheme or port.
-        from urllib.parse import urlparse
-        hostname = urlparse(args.fts).hostname
-        if not hostname:
-            raise TokenError('Could not extract a hostname from "%s"; it needs a '
-                             'scheme, e.g. https://fts.example.org:8446' % args.fts)
-        return hostname, 'fts'
-
-    if args.audience:
-        if args.scope is None:
-            raise TokenError('--audience needs --scope')
-        return args.audience, args.scope
-
-    raise TokenError('Nothing to request; give one of --rse, --fts or --audience')
+    if not args.audience:
+        raise TokenError('Nothing to request; give --audience and --scope')
+    if args.scope is None:
+        raise TokenError('--audience needs --scope')
+    return args.audience, args.scope
 
 
 def main() -> int:
