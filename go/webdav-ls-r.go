@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"davix-explore/internal/webdavsafe"
+	"internal/webdavsafe"
 
 	"github.com/studio-b12/gowebdav"
 )
