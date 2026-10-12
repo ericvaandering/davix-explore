@@ -113,7 +113,8 @@ type tokenManager struct {
 
 func fetchToken(serverPort, directory string) (string, error) {
 	fmt.Fprintln(os.Stderr, "Getting token for "+"https://"+serverPort+directory)
-	out, err := exec.Command("gfal-token", "https://"+serverPort+directory).Output()
+	out, err := exec.Command("/consistency/cms_consistency/site_cmp3/get_oidc_token.py",  "--scope", "storage.read:/ offline_access", "--issuer", "def",
+	"--audience", "https://"+serverPort+directory).Output()
 	if err != nil {
 		return "", err
 	}
