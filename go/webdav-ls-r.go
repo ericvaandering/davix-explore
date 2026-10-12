@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"internal/webdavsafe"
+	"cms-consistency/internal/webdavsafe"
 
 	"github.com/studio-b12/gowebdav"
 )
