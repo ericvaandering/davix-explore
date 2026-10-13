@@ -305,6 +305,53 @@ func abbreviate(s string) string {
 	return fmt.Sprintf("%s...%s <redacted, %d chars>", s[:6], s[len(s)-6:], len(s))
 }
 
+// preflight issues an OPTIONS request against the directory about to be
+// scanned and reports whether the server accepted it.
+//
+// It replaces gowebdav's Connect(), which hardcodes OPTIONS on the server root
+// ("/"). That root is not necessarily a WebDAV collection, or even a path the
+// storage element serves: some return 404 there while serving the scan
+// directory perfectly well, so Connect() rejects a target that would have
+// scanned fine. Asking about the path we actually intend to read tests the
+// thing we care about, and a failure names that path.
+func preflight(rt http.RoundTripper, timeout time.Duration, serverPort, directory, token string) error {
+	// Match how gowebdav addresses a collection: escaped per path segment, with
+	// a trailing slash. Some servers redirect a collection requested without
+	// one, which would cost a round trip and drop the Authorization header.
+	url := "https://" + serverPort + gowebdav.PathEscape(gowebdav.FixSlashes(directory))
+
+	req, err := http.NewRequest("OPTIONS", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	// gowebdav sends Depth on its own OPTIONS; keep it so this request differs
+	// from the one that already works against other servers only in its path.
+	req.Header.Set("Depth", "0")
+
+	client := &http.Client{
+		Transport: rt,
+		Timeout:   timeout,
+		// Report a redirect rather than following it, as gowebdav does. Go drops
+		// the Authorization header across hosts, so a followed redirect would
+		// surface as a confusing 401 instead of the 3xx that explains it.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("OPTIONS %s: %s", url, resp.Status)
+	}
+	return nil
+}
+
 func main() {
 	var token string
 	flag.StringVar(&token, "token", "", "Bearer token for Authorization header")
@@ -388,9 +435,9 @@ func main() {
 		r.Header.Set("Authorization", "Bearer "+tm.Get())
 	})
 
-	// 3. Connect. Diagnostics go to stderr: stdout carries the listing, which
-	// davs_scanner.py parses positionally with line.split().
-	if err := c.Connect(); err != nil {
+	// 3. Preflight the scan directory. Diagnostics go to stderr: stdout carries
+	// the listing, which davs_scanner.py parses positionally with line.split().
+	if err := preflight(recorder, timeout, serverPort, directory, tm.Get()); err != nil {
 		fmt.Fprintln(os.Stderr, "Connection failed:", err)
 		recorder.dump(os.Stderr)
 		os.Exit(1)

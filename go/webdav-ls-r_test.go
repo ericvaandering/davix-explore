@@ -336,3 +336,122 @@ func TestRedactHeaderValue(t *testing.T) {
 		})
 	}
 }
+
+// TestPreflightTargetsScanDirectory covers the case that motivated replacing
+// gowebdav's Connect(): a server that 404s on OPTIONS "/" while serving the
+// scan directory. Connect() would reject such a target outright.
+func TestPreflightTargetsScanDirectory(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("DAV", "1,2")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	// The helper always speaks https, so point it at the test server directly.
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := preflight(rt, time.Minute, host, "/store/data", "tok"); err != nil {
+		t.Fatalf("preflight on the scan directory: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 1 {
+		t.Fatalf("requests = %v, want exactly one", paths)
+	}
+	// Trailing slash: gowebdav addresses collections that way, and a server
+	// that redirects to add one would drop the Authorization header.
+	if paths[0] != "/store/data/" {
+		t.Errorf("OPTIONS path = %q, want %q -- not the server root", paths[0], "/store/data/")
+	}
+}
+
+// TestPreflightReportsHTTPError checks that a rejected preflight fails with the
+// status and the path, rather than being mistaken for success.
+func TestPreflightReportsHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	err := preflight(rt, time.Minute, host, "/store/data", "tok")
+	if err == nil {
+		t.Fatal("preflight succeeded against a 403, want an error")
+	}
+	for _, want := range []string{"403", "/store/data/"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q omits %q", err, want)
+		}
+	}
+}
+
+// TestPreflightSendsAuthorization checks the token reaches the preflight: it is
+// built by hand rather than going through the client's interceptor.
+func TestPreflightSendsAuthorization(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := preflight(rt, time.Minute, host, "/store", "tok123"); err != nil {
+		t.Fatal(err)
+	}
+	if got != "Bearer tok123" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer tok123")
+	}
+}
+
+// TestPreflightEscapesPath checks a directory with characters that must be
+// escaped is not sent raw, which would produce a malformed request.
+func TestPreflightEscapesPath(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.EscapedPath()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := preflight(rt, time.Minute, host, "/store/a b", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, " ") {
+		t.Errorf("escaped path = %q, want the space escaped", got)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
