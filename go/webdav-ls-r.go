@@ -234,7 +234,7 @@ func main() {
 	}
 
 	// 1. Initialize the client
-	c := gowebdav.NewClient("https://"+serverPort, "", "")
+	c := gowebdav.NewClient("davs://"+serverPort, "", "")
 
 	// gowebdav's default client has no timeouts at all, so a hung connection
 	// parks a worker goroutine forever. Bound each stage separately: the
