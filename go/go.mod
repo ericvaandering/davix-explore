@@ -1,4 +1,4 @@
-module davix-explore
+module cms-consistency
 
 go 1.27.0
 

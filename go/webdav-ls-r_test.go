@@ -244,3 +244,95 @@ func TestTokenManagerNoRefreshWhenTokenSupplied(t *testing.T) {
 		t.Errorf("token = %q, want it unchanged", tm.Current())
 	}
 }
+
+// TestHeaderRecorderDumpRedactsCredentials checks that a failed Connect can be
+// diagnosed from the dump without the dump itself becoming a credential leak:
+// the bearer token and both cookie headers must be abbreviated, while the
+// status, the Www-Authenticate challenge and ordinary headers survive intact.
+func TestHeaderRecorderDumpRedactsCredentials(t *testing.T) {
+	const token = "eyJhbGciOiJSUzI1NiJ9.PAYLOADPAYLOADPAYLOAD.SIGNATURE"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Www-Authenticate", `Bearer realm="storage", error="invalid_token"`)
+		w.Header().Set("Set-Cookie", "session=SUPERSECRETCOOKIEVALUE12345; Path=/")
+		w.Header().Set("X-Served-By", "proxy-07")
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := gowebdav.NewClient(srv.URL, "", "")
+	rec := &headerRecorder{rt: http.DefaultTransport}
+	c.SetTransport(rec)
+	c.SetInterceptor(func(_ string, r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Cookie", "sess=ANOTHERSECRETVALUE9999")
+	})
+
+	if err := c.Connect(); err == nil {
+		t.Fatal("Connect() succeeded against a 401 server, want an error")
+	}
+
+	var sb strings.Builder
+	rec.dump(&sb)
+	out := sb.String()
+
+	for _, secret := range []string{token, "SUPERSECRETCOOKIEVALUE12345", "ANOTHERSECRETVALUE9999"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("dump leaked a secret in:\n%s", out)
+		}
+	}
+	// The scheme and the token's ends stay: they distinguish "sent the wrong
+	// token" from "sent no token at all".
+	for _, want := range []string{"401", "Bearer eyJhbG", "invalid_token", "X-Served-By: proxy-07"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dump omitted diagnostic %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestHeaderRecorderStopDropsCapture checks that stop() both frees the
+// captured headers and prevents the scan's own requests from being recorded.
+func TestHeaderRecorderStopDropsCapture(t *testing.T) {
+	rec := &headerRecorder{rt: http.DefaultTransport}
+	rec.method = "OPTIONS"
+	rec.reqHdr = http.Header{"Authorization": []string{"Bearer secret"}}
+
+	rec.stop()
+	if rec.reqHdr != nil || rec.respHdr != nil {
+		t.Error("stop() left captured headers in memory")
+	}
+
+	r, err := http.NewRequest("PROPFIND", "https://example.invalid/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer AFTERSTOP")
+	rec.RoundTrip(r) // The host does not resolve; only the recording matters.
+	if rec.reqHdr != nil {
+		t.Error("RoundTrip recorded a request after stop()")
+	}
+}
+
+// TestRedactHeaderValue pins the per-header policy, including the headers that
+// must NOT be redacted -- a challenge and an ordinary header are the usual
+// diagnosis for a site-specific connection failure.
+func TestRedactHeaderValue(t *testing.T) {
+	const long = "0123456789abcdefghijklmnopqrstuvwxyz"
+	cases := []struct {
+		name, header, value, want string
+	}{
+		{"bearer keeps scheme", "Authorization", "Bearer " + long, "Bearer 012345...uvwxyz <redacted, 36 chars>"},
+		{"short token hides ends", "Authorization", "Bearer abc", "Bearer <redacted, 3 chars>"},
+		{"no scheme", "Authorization", long, "012345...uvwxyz <redacted, 36 chars>"},
+		{"cookie redacted whole", "Cookie", "a=" + long, "a=0123...uvwxyz <redacted, 38 chars>"},
+		{"proxy auth", "Proxy-Authorization", "Basic " + long, "Basic 012345...uvwxyz <redacted, 36 chars>"},
+		{"challenge kept", "Www-Authenticate", `Bearer realm="x", error="expired_token"`, `Bearer realm="x", error="expired_token"`},
+		{"ordinary header kept", "X-Served-By", "proxy-07", "proxy-07"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactHeaderValue(tc.header, tc.value); got != tc.want {
+				t.Errorf("redactHeaderValue(%q, %q) = %q, want %q", tc.header, tc.value, got, tc.want)
+			}
+		})
+	}
+}

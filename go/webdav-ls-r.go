@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -189,6 +192,119 @@ func (tm *tokenManager) refreshLocked(stale string) bool {
 	return newToken != stale
 }
 
+// headerRecorder wraps a RoundTripper and keeps the headers of the most recent
+// exchange until stop is called.
+//
+// Connect reports only a status code ("Connect /: 401") or a bare transport
+// error, which does not separate a token the server rejected from one it never
+// saw: a redirect to another host drops the Authorization header, and a proxy
+// or load balancer can answer in place of the storage element. Recording the
+// exchange lets a failed Connect show what was actually sent and returned.
+// Recording stops once the scan proper starts, so per-listing requests do not
+// pay for it.
+type headerRecorder struct {
+	rt http.RoundTripper
+
+	mu      sync.Mutex
+	stopped bool
+	method  string
+	url     string
+	reqHdr  http.Header
+	status  string
+	respHdr http.Header
+}
+
+func (hr *headerRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := hr.rt.RoundTrip(r)
+
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+	if hr.stopped {
+		return resp, err
+	}
+	hr.method, hr.url, hr.reqHdr = r.Method, r.URL.String(), r.Header.Clone()
+	hr.status, hr.respHdr = "", nil
+	if resp != nil {
+		hr.status, hr.respHdr = resp.Status, resp.Header.Clone()
+	}
+	return resp, err
+}
+
+// stop ends recording and drops what was captured.
+func (hr *headerRecorder) stop() {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+	hr.stopped = true
+	hr.reqHdr, hr.respHdr = nil, nil
+}
+
+// dump writes the recorded exchange with credentials abbreviated.
+func (hr *headerRecorder) dump(w io.Writer) {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+
+	if hr.method == "" {
+		fmt.Fprintln(w, "No request reached the transport.")
+		return
+	}
+	fmt.Fprintf(w, "Request: %s %s\n", hr.method, hr.url)
+	writeHeaders(w, hr.reqHdr)
+	if hr.respHdr == nil {
+		fmt.Fprintln(w, "Response: none, the request failed before the server answered.")
+		return
+	}
+	fmt.Fprintf(w, "Response: %s\n", hr.status)
+	writeHeaders(w, hr.respHdr)
+}
+
+func writeHeaders(w io.Writer, h http.Header) {
+	for _, name := range slices.Sorted(maps.Keys(h)) {
+		for _, v := range h[name] {
+			fmt.Fprintf(w, "  %s: %s\n", name, redactHeaderValue(name, v))
+		}
+	}
+}
+
+// sensitiveHeaders maps a canonical header name to whether its value starts
+// with an auth scheme that should survive redaction. Www-Authenticate is
+// deliberately absent: a challenge is not a credential, and its realm and
+// error description are usually the whole diagnosis.
+var sensitiveHeaders = map[string]bool{
+	"Authorization":       true,
+	"Proxy-Authorization": true,
+	"Cookie":              false,
+	"Set-Cookie":          false,
+}
+
+// redactHeaderValue abbreviates a credential-bearing header value, leaving
+// every other header untouched.
+func redactHeaderValue(name, value string) string {
+	keepScheme, sensitive := sensitiveHeaders[name]
+	if !sensitive {
+		return value
+	}
+	// The scheme ("Bearer", "Basic") is part of the diagnosis and is not itself
+	// a secret. Cookies have no scheme and may contain spaces, so splitting
+	// their value would expose the first name=value pair.
+	if keepScheme {
+		if scheme, rest, found := strings.Cut(value, " "); found {
+			return scheme + " " + abbreviate(rest)
+		}
+	}
+	return abbreviate(value)
+}
+
+// abbreviate renders a secret as its first and last few characters plus its
+// length -- enough to tell two tokens apart, or to spot a truncated or empty
+// one, without putting a usable credential in the log. It matches what
+// fetchToken already prints for a freshly issued token.
+func abbreviate(s string) string {
+	if len(s) <= 20 {
+		return fmt.Sprintf("<redacted, %d chars>", len(s))
+	}
+	return fmt.Sprintf("%s...%s <redacted, %d chars>", s[:6], s[len(s)-6:], len(s))
+}
+
 func main() {
 	var token string
 	flag.StringVar(&token, "token", "", "Bearer token for Authorization header")
@@ -234,7 +350,7 @@ func main() {
 	}
 
 	// 1. Initialize the client
-	c := gowebdav.NewClient("davs://"+serverPort, "", "")
+	c := gowebdav.NewClient("https://"+serverPort, "", "")
 
 	// gowebdav's default client has no timeouts at all, so a hung connection
 	// parks a worker goroutine forever. Bound each stage separately: the
@@ -249,7 +365,10 @@ func main() {
 		// Default is 2, which would make most workers reconnect on every listing.
 		transport.MaxIdleConnsPerHost = numWorkers
 	}
-	c.SetTransport(webdavsafe.NewTransport(transport))
+	// Outermost in the chain, so it sees the request as it goes on the wire --
+	// after the interceptor has added the Authorization header.
+	recorder := &headerRecorder{rt: webdavsafe.NewTransport(transport)}
+	c.SetTransport(recorder)
 	c.SetTimeout(timeout)
 
 	// 2. Set up the bearer token, auto-fetching it via gfal-token if not supplied.
@@ -273,8 +392,12 @@ func main() {
 	// davs_scanner.py parses positionally with line.split().
 	if err := c.Connect(); err != nil {
 		fmt.Fprintln(os.Stderr, "Connection failed:", err)
+		recorder.dump(os.Stderr)
 		os.Exit(1)
 	}
+	// The scan is the hot path and every listing would otherwise clone two
+	// header maps per request.
+	recorder.stop()
 
 	// 4. Recursively scan the tree with a pool of worker goroutines.
 	ctx, cancel := context.WithCancelCause(context.Background())
