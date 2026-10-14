@@ -9,8 +9,6 @@ import time
 import traceback
 from datetime import datetime
 
-import gfal2
-
 from rucio_consistency import Stats, PartitionedList, CEConfiguration
 
 Version = "1.0.1"
@@ -62,19 +60,14 @@ def validate_roots(server, server_root, root_list, timeout):
     good_roots = []
     failed_roots = {}
 
-    ctx = gfal2.creat_context()
-
     for root in root_list:
-        url = f"davs://{server}{server_root}{root}"
+        command = ['webdav-ls', f'{server_root}/{root}']
+        result = subprocess.run(command)
 
-        try:
-            # 3. Retrieve metadata for the remote file
-            print(f"Checking for: {root}")
-            stat_info = ctx.stat(url)
-
+        if result.returncode == 0:
             print(f" Found: {root}")
             good_roots.append(root)
-        except Exception as e:
+        else:
             print(f" Missing: {root}")
             failed_roots.update({root: f"Error accessing directory: {e}"})
 
@@ -119,17 +112,8 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     ignore_list = config.IgnoreList
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
-    # Use davix-ls in recursive parallel mode
-    if False:
-        bearer_token = subprocess.check_output(['gfal-token', f'davs://{server_root}']).strip().decode('utf-8')
-        command = ['davix-ls', '-H', f'Authorization: Bearer {bearer_token}',
-                   '--capath', '/cvmfs/grid.cern.ch/etc/grid-security/certificates/',
-                   '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
-    else:
-        command = ['webdav-ls-r', '-w', f'{max_scanners}', f'{server_root}/{root}']
-
-    # FIXME: This does not worry about the list of all directories since we discard that from the very beginning
-    # FIXME: It could be added.
+    # Use webdav-ls-r
+    command = ['webdav-ls-r', '-w', f'{max_scanners}', f'{server_root}/{root}']
 
     # Open the process with line buffering enabled and return strings instead of bytes
     with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
