@@ -93,6 +93,8 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     n_ignored_dirs = 0
     n_empty_dirs = 0
     total_size = 0
+    failed = False
+    report_error = ''
 
     t0 = time.time()
     root_stats = {
@@ -115,53 +117,65 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     ignore_list = config.IgnoreList
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
-    # Use webdav-ls-r
     path = canonic_path(f'{server_root}/{root}')
+    outer_list_command = ['webdav-ls', path]
+    sub_paths = []
+    with subprocess.Popen(outer_list_command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+        for line in process.stdout:  # Stream the output line-by-line as it arrives
+            drwx, zero, size, cdate, ctime, subpath = line.strip().split()
+            # The entry is a directory
+            logpath = path_converter.path_to_logpath(subpath)
+            if drwx.startswith('d'):
+                n_dirs += 1
+                if file_ignored(logpath, ignore_list):
+                    n_ignored_dirs += 1
+                else:
+                    sub_paths.append(canonic_path(f'{server_root}/{subpath}'))
+            else:
+                pass  # FIXME: We're just ignoring files at too high a level
 
-    with tempfile.NamedTemporaryFile(mode='w+') as temp_file:
-        command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', temp_file.name, path]
+    # Use webdav-ls-r
+    for path in sub_paths:
+        with tempfile.NamedTemporaryFile(mode='w+') as partial_empty_list:
+            command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', partial_empty_list.name, path]
 
-        # Open the process with line buffering enabled and return strings instead of bytes
-        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+            # Open the process with line buffering enabled and return strings instead of bytes
+            with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+                for line in process.stdout:  # Stream the output line-by-line as it arrives
+                    drwx, zero, size, cdate, ctime, path = line.strip().split()
 
-            for line in process.stdout:  # Stream the output line-by-line as it arrives
-                drwx, zero, size, cdate, ctime, path = line.strip().split()
+                    logpath = path_converter.path_to_logpath(path)
 
-                logpath = path_converter.path_to_logpath(path)
+                    # The entry is a directory
+                    if drwx.startswith('d'):
+                        n_dirs += 1
+                        if file_ignored(logpath, ignore_list):
+                            n_ignored_dirs += 1
+                    # The entry is a file
+                    if drwx.startswith('-'):
+                        n_files += 1
+                        if not file_ignored(logpath, ignore_list):
+                            total_size += int(size)
+                            if files_list is not None:
+                                files_list.add(logpath)
+                        else:
+                            n_ignored_files += 1
 
-                # The entry is a directory
-                if drwx.startswith('d'):
-                    n_dirs += 1
-                    if file_ignored(logpath, ignore_list):
-                        n_ignored_dirs += 1
-                # The entry is a file
-                if drwx.startswith('-'):
-                    n_files += 1
-                    if not file_ignored(logpath, ignore_list):
-                        total_size += int(size)
-                        if files_list is not None:
-                            files_list.add(logpath)
-                    else:
-                        n_ignored_files += 1
+            # Read the file of empty directories and add it
+            with open(partial_empty_list.name, 'r', encoding='utf-8') as file:
+                for line in file:
+                    cleaned_line = line.strip()
+                    if compute_empty_dirs:
+                        n_empty_dirs += 1
+                        if empty_dirs_list is not None:
+                            empty_dirs_list.write(cleaned_line + "\n")
 
-        # Read the file of empty directories and add it
-        with open(temp_file.name, 'r', encoding='utf-8') as file:
-            for line in file:
-                # .strip() removes the newline character (\n) from the end of the line
-                cleaned_line = line.strip()
-                if compute_empty_dirs:
-                    n_empty_dirs += 1
-                    if empty_dirs_list is not None:
-                        empty_dirs_list.write(cleaned_line + "\n")
+            # FIXME: Get the JSON file from webdav-ls-r
 
-    # FIXME: Get the JSON file from webdav-ls-r
-
-    # Check if the command executed successfully
-    failed = False
-    report_error = ''
-    if process.returncode != 0:
-        report_error = f"Command failed with exit code {process.returncode}"
-        failed = True
+        # Check if the command executed successfully
+        if process.returncode != 0:
+            report_error += f"Command failed with exit code {process.returncode} on {sub_path}. "
+            failed = True
 
     t1 = time.time()
 
