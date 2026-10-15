@@ -86,8 +86,8 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                   quiet, display_progress, max_scanners, timeout,
                   files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
                   ignore_failed_directories, include_sizes,
-                  do_trace):
-    compute_empty_dirs = False  # FIXME: Need a good method to do this
+                  do_trace, server):
+    compute_empty_dirs = True  # FIXME: Need a good method to do this
     n_files = 0
     n_ignored_files = 0
     n_dirs = 0
@@ -131,11 +131,13 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                 if file_ignored(logpath, ignore_list):
                     n_ignored_dirs += 1
                 else:
-                    sub_paths.append(canonic_path(f'{server_root}/{subpath}'))
+                    sub_paths.append(canonic_path(f'{server}/{subpath}'))
             else:
                 pass  # FIXME: We're just ignoring files at too high a level
 
     # Use webdav-ls-r
+    import pdb; pdb.set_trace()
+    print(sub_paths)
     for sub_path in sub_paths:
         with tempfile.TemporaryDirectory() as temp_dir:
             # Safely construct a unique path inside the secure temporary directory
@@ -165,13 +167,16 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                             n_ignored_files += 1
 
             # Read the file of empty directories and add it
-            with open(partial_empty_list, 'r', encoding='utf-8') as file:
-                for line in file:
-                    cleaned_line = line.strip()
-                    if compute_empty_dirs:
-                        n_empty_dirs += 1
-                        if empty_dirs_list is not None:
-                            empty_dirs_list.write(cleaned_line + "\n")
+            if compute_empty_dirs:
+                try:
+                    with open(partial_empty_list, 'r', encoding='utf-8') as file:
+                        for line in file:
+                            cleaned_line = line.strip()
+                            n_empty_dirs += 1
+                            if empty_dirs_list is not None:
+                                empty_dirs_list.write(cleaned_line + "\n")
+                except FileNotFoundError:
+                    pass
 
             # FIXME: Get the JSON file from webdav-ls-r
 
@@ -340,7 +345,7 @@ def main():
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
-                                       ignore_directory_scan_errors, include_sizes, do_trace)
+                                       ignore_directory_scan_errors, include_sizes, do_trace, server)
             except:
                 exc = traceback.format_exc()
                 print(exc)
