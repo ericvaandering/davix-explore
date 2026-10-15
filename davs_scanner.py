@@ -5,6 +5,7 @@ import gzip
 import json
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime
@@ -115,35 +116,45 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
     # Use webdav-ls-r
-    command = ['webdav-ls-r', '-w', f'{max_scanners}', f'{server_root}/{root}']
+    path = canonic_path(f'{server_root}/{root}')
 
-    # Open the process with line buffering enabled and return strings instead of bytes
-    with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
-        for line in process.stdout:  # Stream the output line-by-line as it arrives
-            drwx, zero, size, cdate, ctime, path = line.strip().split()
+    with tempfile.NamedTemporaryFile(mode='w+', delete_on_close=False) as temp_file:
+        command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', temp_file.name, path]
 
-            logpath = path_converter.path_to_logpath(path)
+        # Open the process with line buffering enabled and return strings instead of bytes
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
 
-            # The entry is a directory
-            if drwx.startswith('d'):
-                n_dirs += 1
-                if not file_ignored(logpath, ignore_list):
-                    if compute_empty_dirs and not int(size):
-                        n_empty_dirs += 1
-                        if empty_dirs_list is not None:
-                            empty_dirs_list.write(logpath + "\n")
-                else:
-                    n_ignored_dirs += 1
+            for line in process.stdout:  # Stream the output line-by-line as it arrives
+                drwx, zero, size, cdate, ctime, path = line.strip().split()
 
-            # The entry is a file
-            if drwx.startswith('-'):
-                n_files += 1
-                if not file_ignored(logpath, ignore_list):
-                    total_size += int(size)
-                    if files_list is not None:
-                        files_list.add(logpath)
-                else:
-                    n_ignored_files += 1
+                logpath = path_converter.path_to_logpath(path)
+
+                # The entry is a directory
+                if drwx.startswith('d'):
+                    n_dirs += 1
+                    if file_ignored(logpath, ignore_list):
+                        n_ignored_dirs += 1
+                # The entry is a file
+                if drwx.startswith('-'):
+                    n_files += 1
+                    if not file_ignored(logpath, ignore_list):
+                        total_size += int(size)
+                        if files_list is not None:
+                            files_list.add(logpath)
+                    else:
+                        n_ignored_files += 1
+
+        # Read the file of empty directories and add it
+        with open(temp_file.name, 'r', encoding='utf-8') as file:
+            for line in file:
+                # .strip() removes the newline character (\n) from the end of the line
+                cleaned_line = line.strip()
+                if compute_empty_dirs:
+                    n_empty_dirs += 1
+                    if empty_dirs_list is not None:
+                        empty_dirs_list.write(cleaned_line + "\n")
+
+    # FIXME: Get the JSON file from webdav-ls-r
 
     # Check if the command executed successfully
     failed = False
