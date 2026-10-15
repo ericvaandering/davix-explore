@@ -118,7 +118,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     # Use webdav-ls-r
     path = canonic_path(f'{server_root}/{root}')
 
-    with tempfile.NamedTemporaryFile(mode='w+', delete_on_close=False) as temp_file:
+    with tempfile.NamedTemporaryFile(mode='w+') as temp_file:
         command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', temp_file.name, path]
 
         # Open the process with line buffering enabled and return strings instead of bytes
