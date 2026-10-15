@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -135,9 +136,11 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                 pass  # FIXME: We're just ignoring files at too high a level
 
     # Use webdav-ls-r
-    for path in sub_paths:
-        with tempfile.NamedTemporaryFile(mode='w+') as partial_empty_list:
-            command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', partial_empty_list.name, path]
+    for sub_path in sub_paths:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Safely construct a unique path inside the secure temporary directory
+            partial_empty_list = os.path.join(temp_dir, "empty_dirs.txt")
+            command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', partial_empty_list, sub_path]
 
             # Open the process with line buffering enabled and return strings instead of bytes
             with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
@@ -162,7 +165,7 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                             n_ignored_files += 1
 
             # Read the file of empty directories and add it
-            with open(partial_empty_list.name, 'r', encoding='utf-8') as file:
+            with open(partial_empty_list, 'r', encoding='utf-8') as file:
                 for line in file:
                     cleaned_line = line.strip()
                     if compute_empty_dirs:
