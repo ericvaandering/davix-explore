@@ -61,7 +61,9 @@ def validate_roots(server, server_root, root_list, timeout):
     failed_roots = {}
 
     for root in root_list:
-        command = ['webdav-ls', f'{server_root}/{root}']
+        path = f'{server}{server_root}/{root}'
+        path = canonic_path(path)
+        command = ['webdav-ls', path]
         result = subprocess.run(command)
 
         if result.returncode == 0:
@@ -69,7 +71,7 @@ def validate_roots(server, server_root, root_list, timeout):
             good_roots.append(root)
         else:
             print(f" Missing: {root}")
-            failed_roots.update({root: f"Error accessing directory: {e}"})
+            failed_roots.update({root: f"Error accessing directory"})
 
     return good_roots, failed_roots
 
