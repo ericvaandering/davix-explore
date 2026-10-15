@@ -72,10 +72,22 @@ func main() {
 	var responseTimeout time.Duration
 	flag.DurationVar(&responseTimeout, "response-timeout", 60*time.Second, "Time limit for the server to send response headers (0 disables)")
 
+	// Defaults to the historical name so existing callers are unaffected.
+	var emptyDirsFile string
+	flag.StringVar(&emptyDirsFile, "empty-dirs", "empty_dirs.out", "File to write the list of empty directories into")
+	flag.StringVar(&emptyDirsFile, "e", "empty_dirs.out", "File to write the list of empty directories into (shorthand)")
+
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: webdav-ls-r [--token TOKEN] [--workers N] [--retries N] [--timeout D] [--response-timeout D] server:port/directory")
+		fmt.Fprintln(os.Stderr, "Usage: webdav-ls-r [--token TOKEN] [--workers N] [--retries N] [--timeout D] [--response-timeout D] [--empty-dirs FILE] server:port/directory")
+		os.Exit(2)
+	}
+
+	// An empty name would send the list to a file literally named "", losing it
+	// silently. Reject it rather than guess what was meant.
+	if emptyDirsFile == "" {
+		fmt.Fprintln(os.Stderr, "Invalid --empty-dirs: must name a file")
 		os.Exit(2)
 	}
 
@@ -103,9 +115,9 @@ func main() {
 	// Keep the overall cap generous -- it covers reading the response body too,
 	// and a PROPFIND on a large directory is legitimately slow.
 	// webdavsafe.Transport additionally rejects truncated listings, which would
-	// otherwise be recorded as empty directories in empty_dirs.out. The recorder
-	// is outermost, so it sees the request as it goes on the wire -- after the
-	// interceptor has added the Authorization header.
+	// otherwise be recorded as empty directories in the --empty-dirs file. The
+	// recorder is outermost, so it sees the request as it goes on the wire --
+	// after the interceptor has added the Authorization header.
 	recorder := webdavcli.NewHeaderRecorder(
 		webdavsafe.NewTransport(webdavcli.NewTransport(responseTimeout, numWorkers)))
 	c.SetTransport(recorder)
@@ -144,8 +156,8 @@ func main() {
 
 	// readDirWithRetry must never return (nil, nil): the caller reads an empty
 	// listing with no error as "this directory is empty" and writes the path to
-	// empty_dirs.out, which is the input to webdav-rm. Every exit from this
-	// function therefore carries either entries or a non-nil error.
+	// the empty-directory list, which is the input to webdav-rm. Every exit from
+	// this function therefore carries either entries or a non-nil error.
 	readDirWithRetry := func(path string) ([]os.FileInfo, error) {
 		var lastErr error
 		// Token renewals do not consume a retry attempt, so bound them
@@ -256,17 +268,17 @@ func main() {
 	// An aborted scan has only walked part of the tree, so its results describe
 	// nothing in particular. Leave the previous run's files in place rather
 	// than replacing them with a truncated list that still looks authoritative
-	// -- empty_dirs.out is the input to webdav-rm.
+	// -- the empty-directory list is the input to webdav-rm.
 	if cause := context.Cause(ctx); cause != nil {
 		fmt.Fprintln(os.Stderr, "Scan aborted:", cause)
-		fmt.Fprintln(os.Stderr, "Results are incomplete; empty_dirs.out and ls_summary.json were left unchanged.")
+		fmt.Fprintf(os.Stderr, "Results are incomplete; %s and ls_summary.json were left unchanged.\n", emptyDirsFile)
 		os.Exit(1)
 	}
 
 	failed := false
 
-	if err := writeFileAtomic("empty_dirs.out", []byte(strings.Join(emptyDirs, "\n")+"\n")); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to write empty_dirs.out:", err)
+	if err := writeFileAtomic(emptyDirsFile, []byte(strings.Join(emptyDirs, "\n")+"\n")); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to write %s: %v\n", emptyDirsFile, err)
 		failed = true
 	}
 
