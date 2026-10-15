@@ -1,25 +1,29 @@
-// webdav-ls reports whether a single WebDAV directory exists.
+// webdav-ls lists one WebDAV directory.
 //
-// It is the non-recursive counterpart to webdav-ls-r: no listing, no output on
-// success, just an exit code. Nothing is printed to stdout, so a caller can
-// test a target without parsing anything.
+// It is the non-recursive counterpart to webdav-ls-r and writes the same
+// stdout format, so the same parser handles both -- davs_scanner.py splits each
+// line positionally with line.split().
+//
+// stdout carries the listing and nothing else. stderr stays silent unless the
+// directory could not be listed, so a caller can read the exit code without
+// filtering diagnostics out of a successful run.
 //
 // Exit codes:
 //
-//	0  the directory exists
-//	1  it does not exist (404), or is not a directory
+//	0  the directory exists; its entries, if any, are on stdout
+//	1  it does not exist, or is not a directory
 //	2  the question could not be answered -- bad usage, no token, or the
 //	   server was unreachable or refused the request
 //
-// Separating 1 from 2 matters: "this directory is gone" and "I could not tell"
-// look the same in a listing but mean opposite things to a caller deciding
-// whether to act on the answer.
+// An empty directory exits 0 with no output: it exists, it just has nothing in
+// it. Separating 1 from 2 matters because "this directory is gone" and "I could
+// not tell" look the same in a listing but mean opposite things to a caller
+// deciding whether to act on the answer.
 package main
 
 import (
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
@@ -30,7 +34,6 @@ import (
 	"github.com/studio-b12/gowebdav"
 )
 
-// Exit codes. Anything other than exists/missing is "could not determine".
 const (
 	exitExists       = 0
 	exitMissing      = 1
@@ -43,92 +46,76 @@ func main() {
 	flag.StringVar(&token, "t", "", "Bearer token for Authorization header (shorthand)")
 
 	var timeout time.Duration
-	flag.DurationVar(&timeout, "timeout", time.Minute, "Overall time limit for a single request, including reading the response (0 disables)")
+	flag.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall time limit for the listing, including reading the response (0 disables)")
 
 	var responseTimeout time.Duration
-	flag.DurationVar(&responseTimeout, "response-timeout", 30*time.Second, "Time limit for the server to send response headers (0 disables)")
-
-	var quiet bool
-	flag.BoolVar(&quiet, "quiet", false, "Suppress diagnostics on stderr; report only through the exit code")
-	flag.BoolVar(&quiet, "q", false, "Suppress diagnostics on stderr (shorthand)")
+	flag.DurationVar(&responseTimeout, "response-timeout", 60*time.Second, "Time limit for the server to send response headers (0 disables)")
 
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: webdav-ls [--token TOKEN] [--timeout D] [--response-timeout D] [--quiet] server:port/directory")
+		fmt.Fprintln(os.Stderr, "Usage: webdav-ls [--token TOKEN] [--timeout D] [--response-timeout D] server:port/directory")
 		os.Exit(exitUndetermined)
-	}
-
-	// Diagnostics go to stderr and stdout is left empty, so a caller can read
-	// the exit code without parsing anything.
-	errOut := io.Discard
-	if !quiet {
-		errOut = os.Stderr
 	}
 
 	serverPort, directory, err := webdavcli.ParseTarget(flag.Arg(0))
 	if err != nil {
-		fmt.Fprintln(errOut, "Invalid target:", err)
+		fmt.Fprintln(os.Stderr, "Invalid target:", err)
 		os.Exit(exitUndetermined)
 	}
 
+	// A successful run says nothing on stderr, so silence the token helper's
+	// own progress chatter. Failures still surface: the error is returned.
+	webdavcli.LogOutput = nil
 	tm, err := webdavcli.NewTokenManager(serverPort, directory, token)
 	if err != nil {
-		fmt.Fprintln(errOut, "Failed to obtain token:", err)
+		fmt.Fprintln(os.Stderr, "Failed to obtain token:", err)
 		os.Exit(exitUndetermined)
 	}
 
-	recorder := webdavcli.NewHeaderRecorder(
-		webdavsafe.NewTransport(webdavcli.NewTransport(responseTimeout, 1)))
-
-	// Preflight the directory itself rather than the server root: some storage
-	// elements return 404 on "/" while serving the target perfectly well, so
-	// asking about the root would report a healthy directory as missing.
-	//
-	// A rejected preflight is not an answer about existence -- the OPTIONS may
-	// have been refused for reasons of its own -- so fall through to the
-	// PROPFIND rather than concluding anything, and keep the recording in case
-	// that fails too.
-	preflightErr := webdavcli.Preflight(recorder, timeout, serverPort, directory, tm.Get())
-
+	// No OPTIONS preflight. webdav-ls-r needs one to fail fast before spawning
+	// workers, but here the PROPFIND below is the only request -- it answers
+	// existence directly, and asking twice would just add a round trip and
+	// another way for a healthy directory to be reported as missing.
 	c := gowebdav.NewClient("https://"+serverPort, "", "")
-	c.SetTransport(recorder)
+	c.SetTransport(webdavsafe.NewTransport(webdavcli.NewTransport(responseTimeout, 1)))
 	c.SetTimeout(timeout)
 	c.SetInterceptor(func(_ string, r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+tm.Get())
 	})
 
-	info, err := stat(c, tm, directory)
+	entries, err := readDir(c, tm, directory)
 	if err != nil {
-		if gowebdav.IsErrNotFound(err) {
-			fmt.Fprintf(errOut, "Does not exist: %s\n", webdavcli.URL(serverPort, directory))
+		// 404 is a plain answer: it is not there. 405 is gowebdav's report that
+		// the path exists but is not a collection, which is not the directory
+		// that was asked about either.
+		if gowebdav.IsErrNotFound(err) || gowebdav.IsErrCode(err, http.StatusMethodNotAllowed) {
+			fmt.Fprintf(os.Stderr, "No such directory: %s\n", webdavcli.URL(serverPort, directory))
 			os.Exit(exitMissing)
 		}
-		fmt.Fprintln(errOut, "Could not determine whether it exists:", err)
-		if preflightErr != nil {
-			fmt.Fprintln(errOut, "The OPTIONS preflight also failed:", preflightErr)
-		}
-		recorder.Dump(errOut)
+		fmt.Fprintln(os.Stderr, "Could not list the directory:", err)
 		os.Exit(exitUndetermined)
 	}
 
-	// A file where a directory was expected is not the thing asked about.
-	if !info.IsDir() {
-		fmt.Fprintf(errOut, "Exists but is not a directory: %s\n", webdavcli.URL(serverPort, directory))
-		os.Exit(exitMissing)
+	// Same layout as webdav-ls-r: mode, a literal 0, size, date, time, path.
+	for _, e := range entries {
+		kind := "-rwxrwxrwx" // Make it look like a regular file by default
+		if e.IsDir() {
+			kind = "drwxrwxrwx" // Make it look like a directory
+		}
+		fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
 	}
 
-	fmt.Fprintf(errOut, "Exists: %s\n", webdavcli.URL(serverPort, directory))
 	os.Exit(exitExists)
 }
 
-// stat looks the directory up, renewing the token once if the server rejects
+// readDir lists the directory, renewing the token once if the server rejects
 // it. A 401 means the token expired, which retrying alone never fixes.
-func stat(c *gowebdav.Client, tm *webdavcli.TokenManager, directory string) (os.FileInfo, error) {
+func readDir(c *gowebdav.Client, tm *webdavcli.TokenManager, directory string) ([]os.FileInfo, error) {
 	used := tm.Current()
-	info, err := c.Stat(directory)
+	entries, err := c.ReadDir(directory)
 	if err != nil && gowebdav.IsErrCode(err, http.StatusUnauthorized) && tm.Refresh(used) {
-		info, err = c.Stat(directory)
+		entries, err = c.ReadDir(directory)
 	}
-	return info, err
+	return entries, err
 }

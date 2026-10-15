@@ -114,9 +114,22 @@ func NewTestTokenManager(token string, autoRefresh bool, fetch func(serverPort, 
 	return &TokenManager{token: token, issuedAt: time.Now(), autoRefresh: autoRefresh, fetch: fetch}
 }
 
+// LogOutput receives progress chatter -- token fetches and refresh warnings.
+// It defaults to stderr; set it to nil in a tool whose stderr must stay silent
+// on a successful run. Errors are returned to the caller regardless, so
+// silencing this never hides a failure.
+var LogOutput io.Writer = os.Stderr
+
+func logf(format string, args ...any) {
+	if LogOutput == nil {
+		return
+	}
+	fmt.Fprintf(LogOutput, format, args...)
+}
+
 // FetchToken mints a bearer token for the given target.
 func FetchToken(serverPort, directory string) (string, error) {
-	fmt.Fprintln(os.Stderr, "Getting token for https://"+serverPort+directory)
+	logf("Getting token for https://%s%s\n", serverPort, directory)
 	out, err := exec.Command(tokenCommand,
 		"--scope", "storage.read:/ offline_access",
 		"--issuer", "def",
@@ -125,7 +138,7 @@ func FetchToken(serverPort, directory string) (string, error) {
 		return "", err
 	}
 	token := strings.TrimSpace(string(out))
-	fmt.Fprintln(os.Stderr, "Got token "+Abbreviate(token))
+	logf("Got token %s\n", Abbreviate(token))
 	return token, nil
 }
 
@@ -184,7 +197,7 @@ func (tm *TokenManager) refreshLocked(stale string) bool {
 	}
 	newToken, err := fetch(tm.serverPort, tm.directory)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Warning: failed to refresh token, keeping existing one:", err)
+		logf("Warning: failed to refresh token, keeping existing one: %v\n", err)
 		return false
 	}
 	tm.token = newToken
