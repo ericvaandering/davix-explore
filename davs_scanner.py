@@ -136,8 +136,6 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                 pass  # FIXME: We're just ignoring files at too high a level
 
     # Use webdav-ls-r
-    import pdb; pdb.set_trace()
-    print(sub_paths)
     for sub_path in sub_paths:
         with tempfile.TemporaryDirectory() as temp_dir:
             # Safely construct a unique path inside the secure temporary directory
