@@ -187,6 +187,106 @@ func TestTokenManagerFailedRefreshDoesNotStorm(t *testing.T) {
 	}
 }
 
+// noTokenFetchDelay removes the pause between token-fetch attempts for the
+// duration of a test, so a retry test runs instantly.
+func noTokenFetchDelay(t *testing.T) {
+	t.Helper()
+	previous := tokenFetchDelay
+	tokenFetchDelay = 0
+	t.Cleanup(func() { tokenFetchDelay = previous })
+}
+
+// TestTokenFetchRetriesTransientFailure checks that the token helper gets the
+// retry budget: a scan must survive a blip in it the same way it survives one
+// in a listing.
+func TestTokenFetchRetriesTransientFailure(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	var fetches int
+	tm := &TokenManager{
+		retries: 3,
+		fetch: func(_, _ string) (string, error) {
+			fetches++
+			if fetches < 3 {
+				return "", fmt.Errorf("issuer unreachable")
+			}
+			return "fresh", nil
+		},
+	}
+
+	token, err := tm.fetchWithRetries()
+	if err != nil {
+		t.Fatalf("fetchWithRetries() returned %v, want the third attempt to succeed", err)
+	}
+	if token != "fresh" {
+		t.Errorf("token = %q, want %q", token, "fresh")
+	}
+	if fetches != 3 {
+		t.Errorf("fetch attempts = %d, want 3", fetches)
+	}
+}
+
+// TestTokenFetchStopsAtRetryBudget checks that a helper which never recovers is
+// attempted retries+1 times and then reports the failure, rather than looping.
+func TestTokenFetchStopsAtRetryBudget(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	for _, retries := range []int{0, 2, -1} {
+		var fetches int
+		tm := &TokenManager{
+			retries: retries,
+			fetch: func(_, _ string) (string, error) {
+				fetches++
+				return "", fmt.Errorf("issuer down")
+			},
+		}
+
+		if _, err := tm.fetchWithRetries(); err == nil {
+			t.Errorf("retries=%d: fetchWithRetries() succeeded, want the last error", retries)
+		}
+		// A negative budget must still buy one attempt, not zero.
+		want := retries + 1
+		if want < 1 {
+			want = 1
+		}
+		if fetches != want {
+			t.Errorf("retries=%d: fetch attempts = %d, want %d", retries, fetches, want)
+		}
+	}
+}
+
+// TestTokenManagerRefreshRetries checks that the retry budget reaches the
+// renewal path too, not just the initial fetch: a 401 mid-scan is exactly when
+// a transient helper failure would otherwise abort the run.
+func TestTokenManagerRefreshRetries(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	var fetches int
+	tm := &TokenManager{
+		token:       "stale",
+		issuedAt:    time.Now(),
+		autoRefresh: true,
+		retries:     2,
+		fetch: func(_, _ string) (string, error) {
+			fetches++
+			if fetches < 2 {
+				return "", fmt.Errorf("issuer unreachable")
+			}
+			return "fresh", nil
+		},
+	}
+
+	if !tm.Refresh("stale") {
+		t.Fatal("Refresh reported no new token, want the retry to have succeeded")
+	}
+	if fetches != 2 {
+		t.Errorf("fetch attempts = %d, want 2", fetches)
+	}
+	if tm.Current() != "fresh" {
+		t.Errorf("token = %q, want %q", tm.Current(), "fresh")
+	}
+}
+
 // TestTokenManagerNoRefreshWhenTokenSupplied checks that an explicit --token
 // is never replaced: there is no gfal-token to re-run.
 func TestTokenManagerNoRefreshWhenTokenSupplied(t *testing.T) {
@@ -317,7 +417,7 @@ func TestPreflightTargetsScanDirectory(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store/data", "tok"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store/data", "tok", 0); err != nil {
 		t.Fatalf("preflight on the scan directory: %v", err)
 	}
 
@@ -347,7 +447,7 @@ func TestPreflightReportsHTTPError(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	err := Preflight(rt, time.Minute, host, "/store/data", "tok")
+	err := Preflight(rt, time.Minute, host, "/store/data", "tok", 0)
 	if err == nil {
 		t.Fatal("preflight succeeded against a 403, want an error")
 	}
@@ -374,7 +474,7 @@ func TestPreflightSendsAuthorization(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store", "tok123"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store", "tok123", 0); err != nil {
 		t.Fatal(err)
 	}
 	if got != "Bearer tok123" {
@@ -398,11 +498,97 @@ func TestPreflightEscapesPath(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store/a b", "tok"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store/a b", "tok", 0); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(got, " ") {
 		t.Errorf("escaped path = %q, want the space escaped", got)
+	}
+}
+
+// noPreflightRetryDelay removes the pause between preflight attempts for the
+// duration of a test, so a retry test runs instantly.
+func noPreflightRetryDelay(t *testing.T) {
+	t.Helper()
+	previous := preflightRetryDelay
+	preflightRetryDelay = 0
+	t.Cleanup(func() { preflightRetryDelay = previous })
+}
+
+// TestPreflightRetriesTransientFailure checks that the preflight gets a retry
+// budget: one blip on the single request that gates the scan must not abort a
+// scan whose listings would have ridden it out.
+func TestPreflightRetriesTransientFailure(t *testing.T) {
+	noPreflightRetryDelay(t)
+
+	var mu sync.Mutex
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := Preflight(rt, time.Minute, host, "/store/data", "tok", 3); err != nil {
+		t.Fatalf("Preflight() returned %v, want the third attempt to succeed", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Errorf("preflight attempts = %d, want 3", attempts)
+	}
+}
+
+// TestPreflightStopsAtRetryBudget checks that a server which never recovers is
+// asked retries+1 times and then reported as a failure, rather than looping. A
+// negative budget still gets one attempt, so an unvalidated flag cannot turn
+// the preflight into a no-op that reports success.
+func TestPreflightStopsAtRetryBudget(t *testing.T) {
+	noPreflightRetryDelay(t)
+
+	for _, tc := range []struct{ retries, want int }{{0, 1}, {2, 3}, {-1, 1}} {
+		var mu sync.Mutex
+		var attempts int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+
+		host := strings.TrimPrefix(srv.URL, "http://")
+		rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			r.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(r)
+		})
+
+		err := Preflight(rt, time.Minute, host, "/store/data", "tok", tc.retries)
+		srv.Close()
+		if err == nil {
+			t.Errorf("retries = %d: Preflight() succeeded against a server that always fails", tc.retries)
+		} else if !strings.Contains(err.Error(), "503") {
+			t.Errorf("retries = %d: error %q omits the last status", tc.retries, err)
+		}
+
+		mu.Lock()
+		if attempts != tc.want {
+			t.Errorf("retries = %d: preflight attempts = %d, want %d", tc.retries, attempts, tc.want)
+		}
+		mu.Unlock()
 	}
 }
 
