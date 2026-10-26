@@ -67,7 +67,9 @@ func main() {
 	// A successful run says nothing on stderr, so silence the token helper's
 	// own progress chatter. Failures still surface: the error is returned.
 	webdavcli.LogOutput = nil
-	tm, err := webdavcli.NewTokenManager(serverPort, directory, token)
+	// No retries on the token helper: this tool makes a single listing and does
+	// not retry that either, so a caller already has to handle a 2 and re-run.
+	tm, err := webdavcli.NewTokenManager(serverPort, directory, token, 0)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to obtain token:", err)
 		os.Exit(exitUndetermined)

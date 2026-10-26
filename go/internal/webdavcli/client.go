@@ -31,6 +31,11 @@ const TokenLifetime = 30 * time.Minute
 // before giving up, since a renewal does not consume a retry attempt.
 const MaxTokenRefreshes = 2
 
+// tokenFetchDelay separates repeated invocations of the token helper, so a
+// transient failure is given a moment to clear rather than being re-tried
+// instantly. It is a variable only so tests need not sleep through it.
+var tokenFetchDelay = 500 * time.Millisecond
+
 // tokenCommand is the helper that mints a bearer token.
 const tokenCommand = "/consistency/cms_consistency/site_cmp3/get_oidc_token.py"
 
@@ -88,24 +93,40 @@ type TokenManager struct {
 	issuedAt    time.Time
 	autoRefresh bool
 
+	// retries is how many extra attempts the token helper gets each time a
+	// token is minted. The helper talks to an issuer over the network, so it
+	// fails transiently for the same reasons a listing does; without this a
+	// single blip in it aborts a scan that the retry loop would otherwise
+	// have ridden out.
+	retries int
+
 	// fetch obtains a fresh token. Nil means FetchToken; tests substitute it.
+	// It is one attempt: the retry loop lives in fetchWithRetries.
 	fetch func(serverPort, directory string) (string, error)
 }
 
 // NewTokenManager returns a manager for the given target. An empty token is
 // fetched immediately and renewed as needed; a supplied one is used as-is and
 // never replaced, since there is nothing to re-run.
-func NewTokenManager(serverPort, directory, token string) (*TokenManager, error) {
-	tm := &TokenManager{serverPort: serverPort, directory: directory}
+//
+// retries is the number of extra attempts each invocation of the token helper
+// gets; zero means a single attempt. A negative value is treated as zero, so a
+// caller that forwards an unvalidated flag still gets one attempt rather than
+// none.
+func NewTokenManager(serverPort, directory, token string, retries int) (*TokenManager, error) {
+	tm := &TokenManager{serverPort: serverPort, directory: directory, retries: retries}
 	if token != "" {
 		tm.token = token
 		return tm, nil
 	}
-	fetched, err := FetchToken(serverPort, directory)
+	// autoRefresh gates refreshLocked, so set it before the first fetch rather
+	// than after: fetchWithRetries is the same code path a later renewal uses.
+	tm.autoRefresh = true
+	fetched, err := tm.fetchWithRetries()
 	if err != nil {
 		return nil, err
 	}
-	tm.token, tm.issuedAt, tm.autoRefresh = fetched, time.Now(), true
+	tm.token, tm.issuedAt = fetched, time.Now()
 	return tm, nil
 }
 
@@ -140,6 +161,40 @@ func FetchToken(serverPort, directory string) (string, error) {
 	token := strings.TrimSpace(string(out))
 	logf("Got token %s\n", Abbreviate(token))
 	return token, nil
+}
+
+// fetchWithRetries mints a token, re-trying a failed attempt up to tm.retries
+// times. It returns the last error if every attempt failed.
+//
+// Callers from refreshLocked hold tm.mu throughout, including the delay between
+// attempts. That is the same deliberate serialisation refreshLocked already
+// relies on -- it collapses a refresh stampede into one helper invocation --
+// and the waiting workers have nothing useful to do with a token the issuer
+// just refused anyway.
+func (tm *TokenManager) fetchWithRetries() (string, error) {
+	fetch := tm.fetch
+	if fetch == nil {
+		fetch = FetchToken
+	}
+
+	attempts := tm.retries + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			logf("Warning: retrying token fetch (attempt %d of %d) after error: %v\n", attempt, attempts-1, lastErr)
+			time.Sleep(tokenFetchDelay)
+		}
+		token, err := fetch(tm.serverPort, tm.directory)
+		if err == nil {
+			return token, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
 }
 
 // Get returns the current token, proactively renewing it once it reaches
@@ -191,11 +246,7 @@ func (tm *TokenManager) refreshLocked(stale string) bool {
 	// single request, under this lock, for the rest of the scan.
 	tm.issuedAt = time.Now()
 
-	fetch := tm.fetch
-	if fetch == nil {
-		fetch = FetchToken
-	}
-	newToken, err := fetch(tm.serverPort, tm.directory)
+	newToken, err := tm.fetchWithRetries()
 	if err != nil {
 		logf("Warning: failed to refresh token, keeping existing one: %v\n", err)
 		return false

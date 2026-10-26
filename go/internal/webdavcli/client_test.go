@@ -187,6 +187,106 @@ func TestTokenManagerFailedRefreshDoesNotStorm(t *testing.T) {
 	}
 }
 
+// noTokenFetchDelay removes the pause between token-fetch attempts for the
+// duration of a test, so a retry test runs instantly.
+func noTokenFetchDelay(t *testing.T) {
+	t.Helper()
+	previous := tokenFetchDelay
+	tokenFetchDelay = 0
+	t.Cleanup(func() { tokenFetchDelay = previous })
+}
+
+// TestTokenFetchRetriesTransientFailure checks that the token helper gets the
+// retry budget: a scan must survive a blip in it the same way it survives one
+// in a listing.
+func TestTokenFetchRetriesTransientFailure(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	var fetches int
+	tm := &TokenManager{
+		retries: 3,
+		fetch: func(_, _ string) (string, error) {
+			fetches++
+			if fetches < 3 {
+				return "", fmt.Errorf("issuer unreachable")
+			}
+			return "fresh", nil
+		},
+	}
+
+	token, err := tm.fetchWithRetries()
+	if err != nil {
+		t.Fatalf("fetchWithRetries() returned %v, want the third attempt to succeed", err)
+	}
+	if token != "fresh" {
+		t.Errorf("token = %q, want %q", token, "fresh")
+	}
+	if fetches != 3 {
+		t.Errorf("fetch attempts = %d, want 3", fetches)
+	}
+}
+
+// TestTokenFetchStopsAtRetryBudget checks that a helper which never recovers is
+// attempted retries+1 times and then reports the failure, rather than looping.
+func TestTokenFetchStopsAtRetryBudget(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	for _, retries := range []int{0, 2, -1} {
+		var fetches int
+		tm := &TokenManager{
+			retries: retries,
+			fetch: func(_, _ string) (string, error) {
+				fetches++
+				return "", fmt.Errorf("issuer down")
+			},
+		}
+
+		if _, err := tm.fetchWithRetries(); err == nil {
+			t.Errorf("retries=%d: fetchWithRetries() succeeded, want the last error", retries)
+		}
+		// A negative budget must still buy one attempt, not zero.
+		want := retries + 1
+		if want < 1 {
+			want = 1
+		}
+		if fetches != want {
+			t.Errorf("retries=%d: fetch attempts = %d, want %d", retries, fetches, want)
+		}
+	}
+}
+
+// TestTokenManagerRefreshRetries checks that the retry budget reaches the
+// renewal path too, not just the initial fetch: a 401 mid-scan is exactly when
+// a transient helper failure would otherwise abort the run.
+func TestTokenManagerRefreshRetries(t *testing.T) {
+	noTokenFetchDelay(t)
+
+	var fetches int
+	tm := &TokenManager{
+		token:       "stale",
+		issuedAt:    time.Now(),
+		autoRefresh: true,
+		retries:     2,
+		fetch: func(_, _ string) (string, error) {
+			fetches++
+			if fetches < 2 {
+				return "", fmt.Errorf("issuer unreachable")
+			}
+			return "fresh", nil
+		},
+	}
+
+	if !tm.Refresh("stale") {
+		t.Fatal("Refresh reported no new token, want the retry to have succeeded")
+	}
+	if fetches != 2 {
+		t.Errorf("fetch attempts = %d, want 2", fetches)
+	}
+	if tm.Current() != "fresh" {
+		t.Errorf("token = %q, want %q", tm.Current(), "fresh")
+	}
+}
+
 // TestTokenManagerNoRefreshWhenTokenSupplied checks that an explicit --token
 // is never replaced: there is no gfal-token to re-run.
 func TestTokenManagerNoRefreshWhenTokenSupplied(t *testing.T) {

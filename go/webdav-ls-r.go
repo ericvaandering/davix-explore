@@ -63,8 +63,8 @@ func main() {
 	flag.IntVar(&numWorkers, "w", 8, "Number of concurrent scanner goroutines (shorthand)")
 
 	var retries int
-	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory before aborting")
-	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory before aborting (shorthand)")
+	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory, and per token fetch, before aborting")
+	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory, and per token fetch, before aborting (shorthand)")
 
 	var timeout time.Duration
 	flag.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall time limit for a single PROPFIND, including reading the response (0 disables)")
@@ -123,8 +123,11 @@ func main() {
 	c.SetTransport(recorder)
 	c.SetTimeout(timeout)
 
-	// 2. Set up the bearer token, auto-fetching it if not supplied.
-	tm, err := webdavcli.NewTokenManager(serverPort, directory, token)
+	// 2. Set up the bearer token, auto-fetching it if not supplied. The token
+	// helper gets the same retry budget as a listing: it reaches an issuer over
+	// the network, so one blip in it would otherwise abort a scan that the
+	// listing retries would have ridden out.
+	tm, err := webdavcli.NewTokenManager(serverPort, directory, token, retries)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Failed to obtain token:", err)
 		os.Exit(1)
