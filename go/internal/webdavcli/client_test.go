@@ -417,7 +417,7 @@ func TestPreflightTargetsScanDirectory(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store/data", "tok"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store/data", "tok", 0); err != nil {
 		t.Fatalf("preflight on the scan directory: %v", err)
 	}
 
@@ -447,7 +447,7 @@ func TestPreflightReportsHTTPError(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	err := Preflight(rt, time.Minute, host, "/store/data", "tok")
+	err := Preflight(rt, time.Minute, host, "/store/data", "tok", 0)
 	if err == nil {
 		t.Fatal("preflight succeeded against a 403, want an error")
 	}
@@ -474,7 +474,7 @@ func TestPreflightSendsAuthorization(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store", "tok123"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store", "tok123", 0); err != nil {
 		t.Fatal(err)
 	}
 	if got != "Bearer tok123" {
@@ -498,11 +498,97 @@ func TestPreflightEscapesPath(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(r)
 	})
 
-	if err := Preflight(rt, time.Minute, host, "/store/a b", "tok"); err != nil {
+	if err := Preflight(rt, time.Minute, host, "/store/a b", "tok", 0); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(got, " ") {
 		t.Errorf("escaped path = %q, want the space escaped", got)
+	}
+}
+
+// noPreflightRetryDelay removes the pause between preflight attempts for the
+// duration of a test, so a retry test runs instantly.
+func noPreflightRetryDelay(t *testing.T) {
+	t.Helper()
+	previous := preflightRetryDelay
+	preflightRetryDelay = 0
+	t.Cleanup(func() { preflightRetryDelay = previous })
+}
+
+// TestPreflightRetriesTransientFailure checks that the preflight gets a retry
+// budget: one blip on the single request that gates the scan must not abort a
+// scan whose listings would have ridden it out.
+func TestPreflightRetriesTransientFailure(t *testing.T) {
+	noPreflightRetryDelay(t)
+
+	var mu sync.Mutex
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		return http.DefaultTransport.RoundTrip(r)
+	})
+
+	if err := Preflight(rt, time.Minute, host, "/store/data", "tok", 3); err != nil {
+		t.Fatalf("Preflight() returned %v, want the third attempt to succeed", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Errorf("preflight attempts = %d, want 3", attempts)
+	}
+}
+
+// TestPreflightStopsAtRetryBudget checks that a server which never recovers is
+// asked retries+1 times and then reported as a failure, rather than looping. A
+// negative budget still gets one attempt, so an unvalidated flag cannot turn
+// the preflight into a no-op that reports success.
+func TestPreflightStopsAtRetryBudget(t *testing.T) {
+	noPreflightRetryDelay(t)
+
+	for _, tc := range []struct{ retries, want int }{{0, 1}, {2, 3}, {-1, 1}} {
+		var mu sync.Mutex
+		var attempts int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+
+		host := strings.TrimPrefix(srv.URL, "http://")
+		rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			r.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(r)
+		})
+
+		err := Preflight(rt, time.Minute, host, "/store/data", "tok", tc.retries)
+		srv.Close()
+		if err == nil {
+			t.Errorf("retries = %d: Preflight() succeeded against a server that always fails", tc.retries)
+		} else if !strings.Contains(err.Error(), "503") {
+			t.Errorf("retries = %d: error %q omits the last status", tc.retries, err)
+		}
+
+		mu.Lock()
+		if attempts != tc.want {
+			t.Errorf("retries = %d: preflight attempts = %d, want %d", tc.retries, attempts, tc.want)
+		}
+		mu.Unlock()
 	}
 }
 

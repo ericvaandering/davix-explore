@@ -375,6 +375,11 @@ func Abbreviate(s string) string {
 	return fmt.Sprintf("%s...%s <redacted, %d chars>", s[:6], s[len(s)-6:], len(s))
 }
 
+// preflightRetryDelay separates preflight attempts, so a transient failure is
+// given a moment to clear rather than being re-tried instantly. It is a
+// variable only so tests need not sleep through it.
+var preflightRetryDelay = 500 * time.Millisecond
+
 // Preflight issues an OPTIONS request against the directory about to be used
 // and reports whether the server accepted it.
 //
@@ -384,7 +389,39 @@ func Abbreviate(s string) string {
 // directory perfectly well, so Connect() rejects a target that would have
 // worked. Asking about the path we actually intend to read tests the thing we
 // care about, and a failure names that path.
-func Preflight(rt http.RoundTripper, timeout time.Duration, serverPort, directory, token string) error {
+//
+// retries is the number of extra attempts the OPTIONS request gets; zero means
+// a single attempt, and a negative value is treated as zero so a caller that
+// forwards an unvalidated flag still gets one attempt rather than none. The
+// preflight is one request against a server that is about to field thousands,
+// so a blip in it would otherwise abort a scan the listing retries would have
+// ridden out. Every failure is re-tried, including a rejected status: a 503
+// from a storage element under load looks the same here as a definitive 403,
+// and the few seconds a doomed preflight spends re-trying are cheap next to a
+// scan that fails to start.
+func Preflight(rt http.RoundTripper, timeout time.Duration, serverPort, directory, token string, retries int) error {
+	attempts := retries + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			logf("Warning: retrying preflight (attempt %d of %d) after error: %v\n", attempt, attempts-1, lastErr)
+			time.Sleep(preflightRetryDelay)
+		}
+		if err := preflightOnce(rt, timeout, serverPort, directory, token); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// preflightOnce is a single OPTIONS attempt.
+func preflightOnce(rt http.RoundTripper, timeout time.Duration, serverPort, directory, token string) error {
 	url := URL(serverPort, directory)
 
 	req, err := http.NewRequest("OPTIONS", url, nil)

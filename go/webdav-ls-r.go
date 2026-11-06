@@ -63,8 +63,8 @@ func main() {
 	flag.IntVar(&numWorkers, "w", 8, "Number of concurrent scanner goroutines (shorthand)")
 
 	var retries int
-	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory, and per token fetch, before aborting")
-	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory, and per token fetch, before aborting (shorthand)")
+	flag.IntVar(&retries, "retries", 3, "Number of retry attempts per directory, per token fetch, and for the preflight, before aborting")
+	flag.IntVar(&retries, "r", 3, "Number of retry attempts per directory, per token fetch, and for the preflight, before aborting (shorthand)")
 
 	var timeout time.Duration
 	flag.DurationVar(&timeout, "timeout", 5*time.Minute, "Overall time limit for a single PROPFIND, including reading the response (0 disables)")
@@ -137,9 +137,11 @@ func main() {
 		r.Header.Set("Authorization", "Bearer "+tm.Get())
 	})
 
-	// 3. Preflight the scan directory. Diagnostics go to stderr: stdout carries
-	// the listing, which davs_scanner.py parses positionally with line.split().
-	if err := webdavcli.Preflight(recorder, timeout, serverPort, directory, tm.Get()); err != nil {
+	// 3. Preflight the scan directory, giving it the same retry budget as a
+	// listing so a blip does not abort the scan before it starts. Diagnostics go
+	// to stderr: stdout carries the listing, which davs_scanner.py parses
+	// positionally with line.split().
+	if err := webdavcli.Preflight(recorder, timeout, serverPort, directory, tm.Get(), retries); err != nil {
 		fmt.Fprintln(os.Stderr, "Connection failed:", err)
 		recorder.Dump(os.Stderr)
 		os.Exit(1)
