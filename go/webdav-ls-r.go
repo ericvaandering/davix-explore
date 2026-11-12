@@ -236,7 +236,11 @@ func main() {
 				if e.IsDir() {
 					kind = "drwxrwxrwx" // Make it look like a directory
 				}
-				fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
+				// gowebdav builds an entry's path as the parent plus the name it
+				// read from the response href, so a doubled slash in either ends
+				// up in the listing davs_scanner.py consumes.
+				fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"),
+					webdavcli.CleanPath(e.(gowebdav.File).Path()))
 			}
 			printMu.Unlock()
 
@@ -252,7 +256,10 @@ func main() {
 			for _, e := range entries {
 				if e.IsDir() {
 					wg.Add(1)
-					go func(childPath string) { jobs <- childPath }(e.(gowebdav.File).Path())
+					// Clean the child before it becomes a job: an uncleaned one
+					// would be requested as-is, prefix every path below it, and
+					// reach the --empty-dirs file webdav-rm deletes from.
+					go func(childPath string) { jobs <- childPath }(webdavcli.CleanPath(e.(gowebdav.File).Path()))
 				}
 			}
 

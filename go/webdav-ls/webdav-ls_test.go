@@ -272,6 +272,41 @@ func TestListingAddressesTheDirectory(t *testing.T) {
 	}
 }
 
+// A target written with a doubled slash -- what a caller produces when it
+// joins a prefix onto an already-absolute path -- must address the same
+// directory as the single-slash form, both on the wire and in the listing that
+// davs_scanner.py parses.
+func TestDoubledSlashesCollapse(t *testing.T) {
+	var paths []string
+	srv := serve(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusMultiStatus)
+		fmt.Fprint(w, listing("/store/data/",
+			entry("/store/data/file.root", false, 12345),
+			entry("/store/data/subdir/", true, 0),
+		))
+	}))
+
+	got := run(t, srv, "//store//data", "--token", "tok")
+	if got.code != 0 {
+		t.Fatalf("exit code = %d (stderr: %s)", got.code, got.stderr)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no request reached the server")
+	}
+	for _, p := range paths {
+		if p != "/store/data/" {
+			t.Errorf("request path = %q, want %q", p, "/store/data/")
+		}
+	}
+	for _, line := range strings.Split(strings.TrimRight(got.stdout, "\n"), "\n") {
+		if strings.Contains(line, "//") {
+			t.Errorf("listing line %q contains a doubled slash", line)
+		}
+	}
+}
+
 // Depth:1 lists the directory's immediate children only.
 func TestListingIsNotRecursive(t *testing.T) {
 	var depths []string
