@@ -100,12 +100,16 @@ func main() {
 	}
 
 	// Same layout as webdav-ls-r: mode, a literal 0, size, date, time, path.
+	// The path has its slashes collapsed for the same reason: gowebdav builds
+	// it from the parent plus the response href, and the listing is parsed
+	// positionally by the same consumer.
 	for _, e := range entries {
 		kind := "-rwxrwxrwx" // Make it look like a regular file by default
 		if e.IsDir() {
 			kind = "drwxrwxrwx" // Make it look like a directory
 		}
-		fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"), e.(gowebdav.File).Path())
+		fmt.Printf("%-10s 0 %12d  %s  %s\n", kind, e.Size(), e.ModTime().Format("2006-01-02 15:04:05"),
+			webdavcli.CleanPath(e.(gowebdav.File).Path()))
 	}
 
 	os.Exit(exitExists)

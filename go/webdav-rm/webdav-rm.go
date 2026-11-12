@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cms-consistency/internal/webdavcli"
 	"cms-consistency/internal/webdavsafe"
 
 	"github.com/studio-b12/gowebdav"
@@ -58,8 +59,18 @@ func main() {
 		return
 	}
 
+	// Parse the server the same way the listing tools parse their target, so a
+	// davs:// URL or a path prefix is understood and its slashes are collapsed
+	// before anything is joined onto it. A bare "host:port" parses to a
+	// directory of "/", which is the historical behaviour.
+	serverPort, prefix, err := webdavcli.ParseTarget(server)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Invalid server:", err)
+		os.Exit(2)
+	}
+
 	// 1. Initialize the client
-	c := gowebdav.NewClient("https://"+server, "", "")
+	c := gowebdav.NewClient("https://"+serverPort+prefix, "", "")
 
 	// gowebdav's default client has no timeouts, and a listing cut short by a
 	// stalled connection parses as an empty directory -- which this program
@@ -80,7 +91,7 @@ func main() {
 	c.SetHeader("Authorization", "Bearer "+token)
 
 	// 3. Connect
-	err := c.Connect()
+	err = c.Connect()
 	if err != nil {
 		fmt.Println("Connection failed:", err)
 		return
@@ -177,7 +188,11 @@ func main() {
 
 	submitted := 0
 	for _, line := range strings.Split(string(data), "\n") {
-		path := strings.TrimSpace(line)
+		// Collapse the slashes in each path: the file is written by a scan,
+		// which may predate the cleaning the scanners now do, and a DELETE is
+		// not something to send to a path that is only approximately the one
+		// that was listed as empty.
+		path := webdavcli.CleanPath(strings.TrimSpace(line))
 		if path == "" {
 			continue
 		}

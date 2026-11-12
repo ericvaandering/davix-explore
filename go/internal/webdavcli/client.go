@@ -39,12 +39,44 @@ var tokenFetchDelay = 500 * time.Millisecond
 // tokenCommand is the helper that mints a bearer token.
 const tokenCommand = "/consistency/cms_consistency/site_cmp3/get_oidc_token.py"
 
+// CleanPath collapses every run of slashes in a path into a single slash and
+// leaves the rest of it untouched. It is not path.Clean: "." and ".." are a
+// caller's business, and the trailing slash that marks a collection is kept.
+//
+// A doubled slash is not cosmetic here. Storage elements disagree about what
+// "/store//data" names -- some serve it, some 404 it as a path with an empty
+// segment -- and the one place it must not differ is the token audience, which
+// the issuer matches against the path actually requested. It also spreads:
+// gowebdav builds a child's path as parent + name, so one "//" in the target
+// reaches every path in the scan, the --empty-dirs file, and from there the
+// DELETEs webdav-rm issues from that file.
+func CleanPath(p string) string {
+	if !strings.Contains(p, "//") {
+		return p
+	}
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		// Drop a slash that another slash follows, keeping the last of a run.
+		if p[i] == '/' && i+1 < len(p) && p[i+1] == '/' {
+			continue
+		}
+		b.WriteByte(p[i])
+	}
+	return b.String()
+}
+
 // ParseTarget splits a target into its host:port and absolute directory.
 //
 // The surrounding tooling speaks davs:// URLs -- davs_scanner.py builds them
 // that way -- so accept a scheme and strip it rather than letting
 // strings.Cut("davs://host/path", "/") produce a host of "davs:" and a
 // directory of "//host/path". Everything is addressed over https regardless.
+//
+// The directory comes back with its slashes collapsed, so a target written
+// "host:1094//store/data" -- a shape the surrounding tooling produces when it
+// joins a prefix onto an already-absolute path -- addresses the same directory
+// as "host:1094/store/data". See CleanPath.
 func ParseTarget(target string) (serverPort, directory string, err error) {
 	if i := strings.Index(target, "://"); i >= 0 {
 		switch scheme := strings.ToLower(target[:i]); scheme {
@@ -63,7 +95,7 @@ func ParseTarget(target string) (serverPort, directory string, err error) {
 	if found {
 		directory += dirPath
 	}
-	return serverPort, directory, nil
+	return serverPort, CleanPath(directory), nil
 }
 
 // URL builds the https URL for a directory, escaped and with a trailing slash.
@@ -71,8 +103,11 @@ func ParseTarget(target string) (serverPort, directory string, err error) {
 // Match how gowebdav addresses a collection: escaped per path segment, with a
 // trailing slash. Some servers redirect a collection requested without one,
 // which would cost a round trip and drop the Authorization header.
+//
+// The directory's slashes are collapsed: gowebdav's FixSlashes only adds the
+// slashes it is missing, so a doubled one would otherwise reach the wire.
 func URL(serverPort, directory string) string {
-	return "https://" + serverPort + gowebdav.PathEscape(gowebdav.FixSlashes(directory))
+	return "https://" + serverPort + gowebdav.PathEscape(gowebdav.FixSlashes(CleanPath(directory)))
 }
 
 // TokenManager holds the current bearer token and, when auto-refresh is on,
@@ -114,7 +149,9 @@ type TokenManager struct {
 // caller that forwards an unvalidated flag still gets one attempt rather than
 // none.
 func NewTokenManager(serverPort, directory, token string, retries int) (*TokenManager, error) {
-	tm := &TokenManager{serverPort: serverPort, directory: directory, retries: retries}
+	// Collapse the slashes once here rather than on every fetch: this is the
+	// directory every token request for this run asks about.
+	tm := &TokenManager{serverPort: serverPort, directory: CleanPath(directory), retries: retries}
 	if token != "" {
 		tm.token = token
 		return tm, nil
@@ -148,13 +185,25 @@ func logf(format string, args ...any) {
 	fmt.Fprintf(LogOutput, format, args...)
 }
 
+// tokenAudience builds the audience a token is minted for.
+//
+// It is the last gate on the token request's path: the issuer matches the
+// audience against the path the tools then request, so a token minted for
+// "https://host//store" need not be accepted on "https://host/store". Collapse
+// the slashes here as well as at the target, so a directory that reached a
+// TokenManager by some other route cannot ask for a token nothing will accept.
+func tokenAudience(serverPort, directory string) string {
+	return "https://" + serverPort + CleanPath(directory)
+}
+
 // FetchToken mints a bearer token for the given target.
 func FetchToken(serverPort, directory string) (string, error) {
-	logf("Getting token for https://%s%s\n", serverPort, directory)
+	audience := tokenAudience(serverPort, directory)
+	logf("Getting token for %s\n", audience)
 	out, err := exec.Command(tokenCommand,
 		"--scope", "storage.read:/ offline_access",
 		"--issuer", "def",
-		"--audience", "https://"+serverPort+directory).Output()
+		"--audience", audience).Output()
 	if err != nil {
 		return "", err
 	}

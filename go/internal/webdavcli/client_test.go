@@ -31,6 +31,13 @@ func TestParseTarget(t *testing.T) {
 		{name: "uppercase scheme", target: "DAVS://host:1094/store", server: "host:1094", dir: "/store"},
 		{name: "scheme, no path", target: "davs://host:1094", server: "host:1094", dir: "/"},
 		{name: "host without port", target: "host/store", server: "host", dir: "/store"},
+		// A caller joining a prefix onto an already-absolute path produces
+		// these; they must name the same directory as the single-slash form.
+		{name: "doubled slash after host", target: "host:1094//store/data", server: "host:1094", dir: "/store/data"},
+		{name: "doubled slash mid-path", target: "davs://host:1094/store//data", server: "host:1094", dir: "/store/data"},
+		{name: "run of slashes", target: "host:1094///store///data", server: "host:1094", dir: "/store/data"},
+		{name: "slashes only", target: "host:1094//", server: "host:1094", dir: "/"},
+		{name: "doubled slash before trailing", target: "host:1094/store//", server: "host:1094", dir: "/store/"},
 
 		{name: "unsupported scheme", target: "gsiftp://host:1094/store", wantErr: true},
 		{name: "empty server", target: "/store/data", wantErr: true},
@@ -57,6 +64,81 @@ func TestParseTarget(t *testing.T) {
 				t.Errorf("ParseTarget(%q) directory = %q, want %q", tc.target, dir, tc.dir)
 			}
 		})
+	}
+}
+
+// TestCleanPath checks that runs of slashes collapse and nothing else about
+// the path changes -- in particular the trailing slash that marks a collection
+// and the dot segments that are the caller's business, not this function's.
+func TestCleanPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/store/data", "/store/data"},
+		{"//store/data", "/store/data"},
+		{"/store//data", "/store/data"},
+		{"/store///data//x", "/store/data/x"},
+		{"//", "/"},
+		{"///", "/"},
+		{"/", "/"},
+		{"", ""},
+		{"/store/data/", "/store/data/"},
+		{"/store/data//", "/store/data/"},
+		{"store/data", "store/data"},
+		{"/store/./data", "/store/./data"},
+		{"/store/../data", "/store/../data"},
+		{"/store/a b//c", "/store/a b/c"},
+	}
+	for _, tc := range cases {
+		if got := CleanPath(tc.in); got != tc.want {
+			t.Errorf("CleanPath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestURLCollapsesSlashes checks the URL the tools report and preflight has no
+// doubled slash: gowebdav's FixSlashes only adds missing slashes, so a doubled
+// one would otherwise survive into the request.
+func TestURLCollapsesSlashes(t *testing.T) {
+	cases := []struct{ dir, want string }{
+		{"//store/data", "https://host:1094/store/data/"},
+		{"/store//data//", "https://host:1094/store/data/"},
+		{"/store/data", "https://host:1094/store/data/"},
+	}
+	for _, tc := range cases {
+		if got := URL("host:1094", tc.dir); got != tc.want {
+			t.Errorf("URL(%q, %q) = %q, want %q", "host:1094", tc.dir, got, tc.want)
+		}
+	}
+}
+
+// TestTokenAudienceCollapsesSlashes checks a token is requested for the path
+// the tools then ask the server about. An issuer matches the audience against
+// that path, so a token minted for "//store" need not work on "/store".
+func TestTokenAudienceCollapsesSlashes(t *testing.T) {
+	cases := []struct{ dir, want string }{
+		{"//store/data", "https://host:1094/store/data"},
+		{"/store//data", "https://host:1094/store/data"},
+		{"/", "https://host:1094/"},
+		{"//", "https://host:1094/"},
+	}
+	for _, tc := range cases {
+		if got := tokenAudience("host:1094", tc.dir); got != tc.want {
+			t.Errorf("tokenAudience(%q, %q) = %q, want %q", "host:1094", tc.dir, got, tc.want)
+		}
+	}
+}
+
+// TestTokenManagerCleansDirectory checks the cleaning happens once, where the
+// directory is stored, so every renewal during a run asks for the same
+// audience as the first fetch did.
+func TestTokenManagerCleansDirectory(t *testing.T) {
+	// A supplied token means no fetch, so this exercises the construction
+	// rather than the token helper.
+	tm, err := NewTokenManager("host:1094", "//store//data", "supplied", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tm.directory != "/store/data" {
+		t.Errorf("stored directory = %q, want %q", tm.directory, "/store/data")
 	}
 }
 
