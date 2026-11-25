@@ -3,13 +3,13 @@
 import argparse
 import gzip
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime
-
-import gfal2
 
 from rucio_consistency import Stats, PartitionedList, CEConfiguration
 
@@ -62,21 +62,18 @@ def validate_roots(server, server_root, root_list, timeout):
     good_roots = []
     failed_roots = {}
 
-    ctx = gfal2.creat_context()
-
     for root in root_list:
-        url = f"davs://{server}{server_root}{root}"
+        path = f'{server}{server_root}/{root}'
+        path = canonic_path(path)
+        command = ['webdav-ls', path]
+        result = subprocess.run(command)
 
-        try:
-            # 3. Retrieve metadata for the remote file
-            print(f"Checking for: {root}")
-            stat_info = ctx.stat(url)
-
+        if result.returncode == 0:
             print(f" Found: {root}")
             good_roots.append(root)
-        except Exception as e:
+        else:
             print(f" Missing: {root}")
-            failed_roots.update({root: f"Error accessing directory: {e}"})
+            failed_roots.update({root: f"Error accessing directory"})
 
     return good_roots, failed_roots
 
@@ -89,14 +86,16 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
                   quiet, display_progress, max_scanners, timeout,
                   files_list, compute_empty_dirs, empty_dirs_list, dirs_list,
                   ignore_failed_directories, include_sizes,
-                  do_trace):
-    compute_empty_dirs = False  # FIXME: Need a good method to do this
+                  do_trace, server):
+    compute_empty_dirs = True  # FIXME: Need a good method to do this
     n_files = 0
     n_ignored_files = 0
     n_dirs = 0
     n_ignored_dirs = 0
     n_empty_dirs = 0
     total_size = 0
+    failed = False
+    report_error = ''
 
     t0 = time.time()
     root_stats = {
@@ -119,49 +118,70 @@ def scan_davs_dir(rse, config, root, root_expected, my_stats, stats, stats_key,
     ignore_list = config.IgnoreList
     path_converter = PathConverter(server_root, remove_prefix, add_prefix, root)
 
-    # Use davix-ls in recursive parallel mode
-    bearer_token = subprocess.check_output(['gfal-token', f'davs://{server_root}']).strip().decode('utf-8')
-    command = ['davix-ls', '-H', f'Authorization: Bearer {bearer_token}',
-               '--capath', '/cvmfs/grid.cern.ch/etc/grid-security/certificates/',
-               '-l', f'-r{max_scanners}', f'davs://{server_root}/{root}']
-
-    # FIXME: This does not worry about the list of all directories since we discard that from the very beginning
-    # FIXME: It could be added.
-
-    # Open the process with line buffering enabled and return strings instead of bytes
-    with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+    path = canonic_path(f'{server_root}/{root}')
+    outer_list_command = ['webdav-ls', path]
+    sub_paths = []
+    with subprocess.Popen(outer_list_command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
         for line in process.stdout:  # Stream the output line-by-line as it arrives
-            drwx, zero, size, cdate, ctime, path = line.strip().split()
-
-            logpath = path_converter.path_to_logpath(path)
-
+            drwx, zero, size, cdate, ctime, subpath = line.strip().split()
             # The entry is a directory
+            logpath = path_converter.path_to_logpath(subpath)
             if drwx.startswith('d'):
                 n_dirs += 1
-                if not file_ignored(logpath, ignore_list):
-                    if compute_empty_dirs and not int(size):
-                        n_empty_dirs += 1
-                        if empty_dirs_list is not None:
-                            empty_dirs_list.write(logpath + "\n")
-                else:
+                if file_ignored(logpath, ignore_list):
                     n_ignored_dirs += 1
-
-            # The entry is a file
-            if drwx.startswith('-'):
-                n_files += 1
-                if not file_ignored(logpath, ignore_list):
-                    total_size += int(size)
-                    if files_list is not None:
-                        files_list.add(logpath)
                 else:
-                    n_ignored_files += 1
+                    sub_paths.append(canonic_path(f'{server}/{subpath}'))
+            else:
+                pass  # FIXME: We're just ignoring files at too high a level
 
-    # Check if the command executed successfully
-    failed = False
-    report_error = ''
-    if process.returncode != 0:
-        report_error = f"Command failed with exit code {process.returncode}"
-        failed = True
+    # Use webdav-ls-r
+    for sub_path in sub_paths:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Safely construct a unique path inside the secure temporary directory
+            partial_empty_list = os.path.join(temp_dir, "empty_dirs.txt")
+            command = ['webdav-ls-r', '-w', f'{max_scanners}', '-e', partial_empty_list, sub_path]
+
+            # Open the process with line buffering enabled and return strings instead of bytes
+            with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, bufsize=1) as process:
+                for line in process.stdout:  # Stream the output line-by-line as it arrives
+                    drwx, zero, size, cdate, ctime, path = line.strip().split()
+
+                    logpath = path_converter.path_to_logpath(path)
+
+                    # The entry is a directory
+                    if drwx.startswith('d'):
+                        n_dirs += 1
+                        if file_ignored(logpath, ignore_list):
+                            n_ignored_dirs += 1
+                    # The entry is a file
+                    if drwx.startswith('-'):
+                        n_files += 1
+                        if not file_ignored(logpath, ignore_list):
+                            total_size += int(size)
+                            if files_list is not None:
+                                files_list.add(logpath)
+                        else:
+                            n_ignored_files += 1
+
+            # Read the file of empty directories and add it
+            if compute_empty_dirs:
+                try:
+                    with open(partial_empty_list, 'r', encoding='utf-8') as file:
+                        for line in file:
+                            cleaned_line = line.strip()
+                            n_empty_dirs += 1
+                            if empty_dirs_list is not None:
+                                empty_dirs_list.write(cleaned_line + "\n")
+                except FileNotFoundError:
+                    pass
+
+            # FIXME: Get the JSON file from webdav-ls-r
+
+        # Check if the command executed successfully
+        if process.returncode != 0:
+            report_error += f"Command failed with exit code {process.returncode} on {sub_path}. "
+            failed = True
 
     t1 = time.time()
 
@@ -323,7 +343,7 @@ def main():
                 failed = scan_davs_dir(rse, config, root, expected, my_stats, stats, stats_key,
                                        quiet, display_progress, max_scanners, timeout,
                                        out_list, compute_empty_dirs, empty_dirs_out, None,
-                                       ignore_directory_scan_errors, include_sizes, do_trace)
+                                       ignore_directory_scan_errors, include_sizes, do_trace, server)
             except:
                 exc = traceback.format_exc()
                 print(exc)
